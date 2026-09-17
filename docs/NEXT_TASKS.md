@@ -29,7 +29,7 @@ LLM calls. Fake-LLM tests prove durable confirmation and restart-safe F6.
 
 ## T-038 Phase 2 · Local voice loop
 
-**Priority:** 1 · **Status:** Not started · **Phase:** 6 (voice layer, per
+**Priority:** 1 · **Status:** In progress · **Phase:** 6 (voice layer, per
 CLAUDE.md's MVP build order — comes after the eval gate, which is done, and
 before persistence's remaining layers: customer memory/reorder fast path
 depend on this existing first)
@@ -41,6 +41,18 @@ T-037 built and tested the persistence machinery
 persisted) and no telephony/voice loop exists yet. This is the first task
 that actually needs the STT/TTS/telephony provider decision ADR-004 deferred
 to this phase.
+
+**2026-09-17 provider increment:** Parakeet is selected for the local pilot
+after a same-file hardware benchmark: 0.082 s warm median for 2.586 s audio
+(31.5x realtime, 2.60 GB GPU peak) versus faster-whisper `small` CPU at
+2.748 s (0.9x realtime, 0.95 GB RSS). ADR-016 records the decision. A warm,
+localhost-only WSL server (`scripts/parakeet_server.py`) and Windows-side
+`ParakeetProvider` are implemented; faster-whisper remains a fallback. Offline
+provider/error-path tests and the full repository suite are green. **Still
+required before Phase 2 is DONE:** run the real microphone -> Parakeet ->
+PersistentChat -> Windows SAPI loop on the owner's hardware, capture at least
+10 human turns (including negation, quantities, corrections and half scope),
+and report per-stage median/p95 plus transcript/order failures.
 
 **Scope:** pick/confirm the voice provider (ADR-004a, if not already
 resolved by the time this starts), build the call-handling loop that: (1)

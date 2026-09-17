@@ -19,7 +19,8 @@ did not agree to. Those are code properties, not prompt instructions.
 | Coupons | **Done** — 4 offers, never stack, code printed on the ticket |
 | Text order sandbox (`lakewood.chat`), rule-based mode | **Done** — headless, deterministic, no LLM/credentials |
 | Real LLM interpreter (Anthropic / OpenAI) | **Built, unit-tested — live benchmark blocked** on a funded API key, see below |
-| Voice + telephony | Not started |
+| Local voice loop | **Built, offline-tested; Parakeet hardware E2E pending** |
+| Production telephony | Not started |
 | Reconciliation report | Not started |
 
 ```
@@ -99,14 +100,37 @@ Local speech-to-text (`lakewood/stt/`, feeds text into this same
 interpreter layer, nothing downstream changes):
 
 ```bash
-LAKEWOOD_STT_PROVIDER=faster_whisper python -m lakewood.stt.eval
+LAKEWOOD_STT_PROVIDER=parakeet python -m lakewood.stt.eval
 ```
 
-Requires `pip install faster-whisper` (optional — the default `fake`
-provider needs nothing installed; used for all offline tests). Reports
+Parakeet is the measured local-pilot choice (ADR-016); faster-whisper remains
+a CPU fallback (ADR-008). Start the already-installed NeMo environment in WSL
+first, keeping the model warm:
+
+```bash
+cd ~/lakewood-stt/NeMo
+./.venv/bin/python /mnt/d/Projects/Ai/scripts/parakeet_server.py \
+  --warmup-audio /home/ckvis/lakewood-stt/lakewood_test.wav
+```
+
+Then, in Windows PowerShell:
+
+```powershell
+cd D:\Projects\Ai
+curl.exe http://127.0.0.1:8765/healthz
+$env:LAKEWOOD_STT_PROVIDER = 'parakeet'
+$env:LAKEWOOD_PARAKEET_URL = 'http://127.0.0.1:8765'
+$env:LAKEWOOD_INTERPRETER = 'rule_based'
+python -m lakewood.voice
+```
+
+The server binds to localhost only. It must not be exposed to another machine
+without authentication and TLS. `faster-whisper` still requires
+`pip install faster-whisper`; the default `fake` provider needs nothing and is
+used for offline tests. The STT eval reports
 domain-weighted accuracy (topping names, sizes, quantities, negations,
 half/left/right scope) per category, not generic word-error-rate — see
-`docs/decisions/ADR-008-local-stt-runtime.md`.
+`docs/decisions/ADR-016-parakeet-local-stt.md`.
 
 PowerShell configuration (supply the API key through your environment securely):
 
@@ -166,7 +190,7 @@ lakewood/
   interpreter.py  text -> structured ToolCall(s). RuleBasedInterpreter + LLMInterpreter.
   llm_provider.py Anthropic / OpenAI / Ollama adapters; stdlib HTTP, no SDKs.
   chat.py      headless text sandbox: `python -m lakewood.chat`
-  stt/         local speech-to-text: base.py (interface), fake.py, faster_whisper_provider.py
+  stt/         local STT: interface, fake, Parakeet client, faster-whisper fallback
 tests/         regression suite — every case is an observed POS total
   test_pricing_parity.py   the release-gate suite: 50 cases across 6 categories
 evals/         L1 golden transcripts (text in, tool calls out)

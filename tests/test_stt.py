@@ -146,13 +146,15 @@ def test_provider_error_on_one_fixture_does_not_crash_the_whole_run():
 
 # --- boundary discipline ------------------------------------------------------
 
-def test_no_faster_whisper_types_leak_past_the_stt_package():
+def test_no_stt_provider_types_leak_past_the_stt_package():
     import pathlib
     root = pathlib.Path(__file__).resolve().parent.parent / "lakewood"
     for name in ("menu.py", "pricing.py", "orders.py", "interpreter.py", "chat.py"):
         src = (root / name).read_text()
         assert "faster_whisper" not in src
         assert "whisper" not in src.lower()
+        assert "parakeet" not in src.lower()
+        assert "nemo" not in src.lower()
 
 
 def test_faster_whisper_provider_missing_dependency_fails_closed(monkeypatch):
@@ -184,3 +186,10 @@ def test_make_stt_provider_rejects_unknown_name(monkeypatch):
     from lakewood.stt.faster_whisper_provider import make_stt_provider
     with pytest.raises(STTConfigError, match="not-a-real-provider"):
         make_stt_provider()
+
+
+def test_make_stt_provider_selects_parakeet(monkeypatch):
+    monkeypatch.setenv("LAKEWOOD_STT_PROVIDER", "parakeet")
+    from lakewood.stt.faster_whisper_provider import make_stt_provider
+    from lakewood.stt.parakeet_provider import ParakeetProvider
+    assert isinstance(make_stt_provider(), ParakeetProvider)

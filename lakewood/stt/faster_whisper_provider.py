@@ -96,5 +96,9 @@ def make_stt_provider():
         return FakeSTTProvider()
     if name == "faster_whisper":
         return FasterWhisperProvider()
+    if name == "parakeet":
+        from .parakeet_provider import ParakeetProvider
+        return ParakeetProvider()
     raise STTConfigError(
-        f"Unknown LAKEWOOD_STT_PROVIDER={name!r}; choose 'fake' or 'faster_whisper'.")
+        f"Unknown LAKEWOOD_STT_PROVIDER={name!r}; choose 'fake', "
+        "'faster_whisper', or 'parakeet'.")

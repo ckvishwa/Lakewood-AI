@@ -3,8 +3,9 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-16 on Windows/local (T-037). This directory is not a
-Git repository, so no verified commit ID or Git diff is available.
+Last verified: 2026-09-17 on Linux/offline (T-038 Phase 2 Parakeet increment),
+branch `codex/parakeet-stt` based on `6de7c38`. Real GPU numbers below were
+measured separately on the owner's Windows/WSL hardware.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -19,6 +20,30 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-038 Phase 2 Parakeet increment PARTIALLY VERIFIED, 2026-09-17.** The
+local voice loop now has a production-shaped local STT boundary:
+`scripts/parakeet_server.py` keeps `nvidia/parakeet-unified-en-0.6b` warm in
+the existing WSL NeMo/CUDA environment; Windows-side
+`lakewood/stt/parakeet_provider.py` sends WAV bytes over localhost and returns
+the unchanged `STTResult` contract. The service is localhost-only, serializes
+inference on the 4 GB GPU, loads once, supports an explicit warm-up file, and
+exposes `/healthz`. The client fails closed for missing/empty/short/corrupt
+audio, service/HTTP failure, malformed JSON, and empty model output. Faster-
+whisper remains available as fallback; no NeMo type or dependency enters the
+Windows app/domain environment. Decision and tradeoffs: ADR-016.
+
+Real same-file hardware measurement: a 2.586125 s human recording transcribed
+correctly by both providers. Parakeet warm median **0.082 s** (~31.5x
+realtime), 2.60 GB GPU peak, 11.073 s cold load; faster-whisper `small` CPU
+median **2.748 s** (0.9x realtime), 0.95 GB RSS, 12.340 s cold load. This
+chooses the latency provider; it is not production-accuracy evidence.
+
+Offline verification: 508 collected, 504 passed / 2 skipped / 2 xfailed;
+`validate` 73/73; rule-based 36/73 (unchanged expected coverage); pricing
+parity 50/50. **Not yet verified here:** the real Windows microphone -> warm
+WSL Parakeet -> PersistentChat -> SAPI end-to-end loop. That hardware run,
+with at least 10 human turns and per-stage median/p95, is the next task.
 
 **T-038 Phase 1 done, 2026-09-16:** `PersistentChat` now wires the normal
 text path through `resume_or_create`, explicit accept/decline recovery, and
