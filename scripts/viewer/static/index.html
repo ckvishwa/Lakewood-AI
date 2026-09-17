@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lakewood Trace Viewer</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #171b21; --border: #2a2f38; --text: #e6e9ef;
+    --muted: #8b93a1; --ok: #3ecf7a; --err: #ef5b5b; --warn: #e0a12e;
+    --accent: #5b8def; --schema: #b46be0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+         background: var(--bg); color: var(--text); }
+  header { display:flex; align-items:center; gap:16px; padding:10px 16px;
+           background:var(--panel); border-bottom:1px solid var(--border);
+           position:sticky; top:0; z-index:5; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .tabs { display:flex; gap:4px; }
+  .tab { padding:6px 12px; border-radius:6px; cursor:pointer; color:var(--muted); }
+  .tab.active { background:var(--accent); color:#fff; }
+  .banner { margin-left:auto; font-size:12px; color:var(--muted); }
+  .banner b { color: var(--text); }
+  main { padding:16px; max-width:1100px; margin:0 auto; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--border); }
+  th { color:var(--muted); font-weight:600; cursor:pointer; user-select:none; }
+  tr:hover { background:#1b2028; }
+  .pill { display:inline-block; padding:1px 8px; border-radius:10px; font-size:11px; }
+  .pill.pass { background:rgba(62,207,122,.15); color:var(--ok); }
+  .pill.fail { background:rgba(239,91,91,.15); color:var(--err); }
+  .pill.na { background:rgba(139,147,161,.15); color:var(--muted); }
+  input, select, button { background:#0d1014; color:var(--text); border:1px solid var(--border);
+         border-radius:6px; padding:6px 10px; font-size:13px; }
+  button { cursor:pointer; background:var(--accent); border-color:var(--accent); color:#fff; }
+  button.secondary { background:#0d1014; color:var(--text); border-color:var(--border); }
+  .row { display:flex; gap:8px; align-items:center; margin-bottom:12px; flex-wrap:wrap; }
+  .turn { background:var(--panel); border:1px solid var(--border); border-radius:10px;
+          padding:12px 14px; margin-bottom:10px; }
+  .utterance { font-weight:600; margin-bottom:8px; }
+  .utterance:before { content:"customer: "; color:var(--muted); font-weight:400; }
+  .call { border-left:3px solid var(--border); padding:4px 0 4px 10px; margin:6px 0; font-family:ui-monospace,Consolas,monospace; font-size:12.5px; }
+  .call.ok { border-color: var(--ok); }
+  .call.domain-refusal { border-color: var(--warn); }
+  .call.schema-error { border-color: var(--schema); }
+  .tag { font-size:10px; padding:0 6px; border-radius:8px; margin-right:6px; text-transform:uppercase; letter-spacing:.03em; }
+  .tag.ok { background:rgba(62,207,122,.15); color:var(--ok); }
+  .tag.domain-refusal { background:rgba(224,161,46,.15); color:var(--warn); }
+  .tag.schema-error { background:rgba(180,107,224,.15); color:var(--schema); }
+  .query { color: var(--accent); }
+  .reply { margin-top:8px; padding:8px 10px; background:#0d1014; border-radius:6px; }
+  .reply:before { content:"assistant: "; color:var(--muted); }
+  .diff { font-size:12px; margin-top:6px; }
+  .diff .add { color: var(--ok); }
+  .diff .rem { color: var(--err); }
+  .state-line { font-size:11px; color:var(--muted); margin-top:6px; }
+  .fail-badge { color:var(--err); font-weight:600; }
+  .pass-badge { color:var(--ok); font-weight:600; }
+  .muted { color: var(--muted); }
+  #liveTranscript, #replayTranscript { margin-top:14px; }
+  code { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Lakewood Trace Viewer</h1>
+  <div class="tabs">
+    <div class="tab active" data-tab="catalog">Catalog</div>
+    <div class="tab" data-tab="replay">Replay</div>
+    <div class="tab" data-tab="live">Live</div>
+  </div>
+  <div class="banner" id="banner">localhost only</div>
+</header>
+<main>
+
+  <section id="panel-catalog" class="panel active">
+    <div class="row">
+      <input id="catFilter" placeholder="filter by tag, id, or text..." style="flex:1;min-width:200px">
+      <select id="catStatus">
+        <option value="">all</option>
+        <option value="fail">failing (rule-based or live)</option>
+        <option value="pass">passing everywhere known</option>
+      </select>
+      <button class="secondary" onclick="loadCatalog()">Refresh</button>
+    </div>
+    <table id="catTable">
+      <thead><tr>
+        <th onclick="sortCat('id')">ID</th><th onclick="sortCat('tags')">Tags</th>
+        <th>What it tests</th><th onclick="sortCat('rb')">Rule-based</th>
+        <th onclick="sortCat('live')">Live (recent)</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section id="panel-replay" class="panel">
+    <div class="row">
+      <select id="traceFile"></select>
+      <select id="traceCase"></select>
+      <label><input type="checkbox" id="failOnly"> failures only</label>
+      <span class="muted" id="repInfo"></span>
+    </div>
+    <div id="replayTranscript"></div>
+  </section>
+
+  <section id="panel-live" class="panel">
+    <div class="row">
+      <select id="liveProvider">
+        <option value="rule_based">rule_based</option>
+        <option value="ollama">ollama</option>
+        <option value="experiential">experiential</option>
+      </select>
+      <input id="liveModel" placeholder="model (optional)" style="width:200px">
+      <button onclick="newLiveSession()">New Session</button>
+      <span class="muted" id="liveSessionInfo">no session yet</span>
+    </div>
+    <div class="row">
+      <input id="liveUtterance" placeholder="type what the customer says..." style="flex:1" onkeydown="if(event.key==='Enter')sendLiveTurn()">
+      <button onclick="sendLiveTurn()">Send</button>
+    </div>
+    <div id="liveTranscript"></div>
+  </section>
+
+</main>
+<script>
+// ---- tabs ----
+document.querySelectorAll('.tab').forEach(t => t.onclick = () => {
+  document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
+  document.querySelectorAll('.panel').forEach(x => x.classList.remove('active'));
+  t.classList.add('active');
+  document.getElementById('panel-' + t.dataset.tab).classList.add('active');
+});
+
+// ---- shared rendering: replay and live both call this. one function. ----
+const SCHEMA_CODES = new Set(['BAD_ARGS', 'UNKNOWN_TOOL']);
+const REFUSAL_CODES = new Set(['ITEM_NOT_FOUND','TOPPING_NOT_FOUND','GOURMET_NOT_FOUND',
+  'SIZE_NOT_FOUND','NO_MATCH','UNAVAILABLE','BAD_STATE','UNRESOLVED_REQUEST',
+  'STALE_QUOTE','CART_CHANGED','PREMATURE_CONFIRMATION','BAD_QUANTITY',
+  'BAD_HALF_AND_HALF','NOT_ON_PIZZA','BAD_LINE','PRICE_UNKNOWN']);
+
+function classifyCall(c) {
+  const code = c.result && c.result.code;
+  if (code && SCHEMA_CODES.has(code)) return 'schema-error';
+  if (c.result && c.result.status === 'error') return 'domain-refusal';
+  if (c.tool === 'search_menu' && c.result && c.result.needs_disambiguation) return 'domain-refusal';
+  return 'ok';
+}
+function classifyLabel(cls) {
+  return {'schema-error': 'SCHEMA ERROR', 'domain-refusal': 'DOMAIN REFUSAL', 'ok': 'OK'}[cls];
+}
+
+function renderCallArgs(args) {
+  return Object.entries(args || {}).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(', ');
+}
+
+function cartDiff(prevCart, curCart) {
+  prevCart = prevCart || []; curCart = curCart || [];
+  const key = l => `${l.name}|${l.total}`;
+  const prevKeys = new Set(prevCart.map(key));
+  const curKeys = new Set(curCart.map(key));
+  const added = curCart.filter(l => !prevKeys.has(key(l)));
+  const removed = prevCart.filter(l => !curKeys.has(key(l)));
+  if (!added.length && !removed.length) return '<span class="muted">cart unchanged</span>';
+  let html = '';
+  added.forEach(l => html += `<div class="add">+ ${l.name} (${l.total})</div>`);
+  removed.forEach(l => html += `<div class="rem">- ${l.name} (${l.total})</div>`);
+  return html;
+}
+
+function renderTurn(turn, prevCart) {
+  const calls = (turn.calls || []).map(c => {
+    const cls = classifyCall(c);
+    let extra = '';
+    if (c.tool === 'search_menu') {
+      extra = ` <span class="query">query=${JSON.stringify(c.args.query)}</span>`;
+      if (c.result && c.result.results) {
+        extra += ` -> [${c.result.results.map(h => h.name || ('#' + h.number)).join(', ')}]`;
+      }
+    }
+    return `<div class="call ${cls}"><span class="tag ${cls}">${classifyLabel(cls)}</span>` +
+           `<b>${c.tool}</b>(${renderCallArgs(c.args)})${extra} -> ` +
+           `${c.result && c.result.status === 'error' ? c.result.code + ': ' + c.result.message
+             : JSON.stringify(c.result)}</div>`;
+  }).join('');
+  const snap = turn.state_after || {};
+  const diff = cartDiff(prevCart, snap.cart);
+  const pend = (snap.pending_disambiguations || []).map(p =>
+    `${p.query} (asked ${p.ask_count}x)`).join('; ');
+  const unresolved = (snap.unresolved_lookups || []).join('; ');
+  return `<div class="turn">
+    <div class="utterance">${turn.utterance}</div>
+    ${calls}
+    <div class="reply">${turn.reply || ''}</div>
+    <div class="diff">${diff}</div>
+    <div class="state-line">state=${snap.state} subtotal=${snap.subtotal} total=${snap.total}
+      ${pend ? ' | pending: ' + pend : ''}${unresolved ? ' | unresolved: ' + unresolved : ''}</div>
+  </div>`;
+}
+
+function renderCaseRun(entry) {
+  let prevCart = [];
+  const html = (entry.turns || []).map(t => {
+    const h = renderTurn(t, prevCart);
+    prevCart = (t.state_after || {}).cart || prevCart;
+    return h;
+  }).join('');
+  const badge = entry.passed
+    ? '<span class="pass-badge">PASS</span>'
+    : `<span class="fail-badge">FAIL — ${entry.detail || ''}</span>`;
+  return `<h3>${entry.case_id} ${badge}</h3>
+    <div class="muted">expects: ${JSON.stringify(entry.assert_final)}</div>${html}`;
+}
+
+// ---- catalog ----
+let catalogData = [];
+async function loadCatalog() {
+  const r = await fetch('/catalog.json');
+  catalogData = await r.json();
+  drawCatalog();
+}
+function drawCatalog() {
+  const filter = document.getElementById('catFilter').value.toLowerCase();
+  const status = document.getElementById('catStatus').value;
+  const rows = catalogData.filter(c => {
+    const hay = (c.id + ' ' + c.tags.join(' ') + ' ' + c.description).toLowerCase();
+    if (filter && !hay.includes(filter)) return false;
+    const rbFail = c.rule_based && !c.rule_based.passed;
+    const liveFail = c.live_recent && c.live_recent.of > 0 && c.live_recent.passed < c.live_recent.of;
+    if (status === 'fail' && !(rbFail || liveFail)) return false;
+    if (status === 'pass' && (rbFail || liveFail)) return false;
+    return true;
+  });
+  const tbody = document.querySelector('#catTable tbody');
+  tbody.innerHTML = rows.map(c => {
+    const rb = c.rule_based
+      ? `<span class="pill ${c.rule_based.passed ? 'pass' : 'fail'}">${c.rule_based.passed ? 'pass' : 'fail'}</span>`
+      : '<span class="pill na">n/a</span>';
+    const live = c.live_recent && c.live_recent.of > 0
+      ? `<span class="pill ${c.live_recent.passed === c.live_recent.of ? 'pass' : 'fail'}">${c.live_recent.passed}/${c.live_recent.of}</span>`
+      : '<span class="pill na">no data</span>';
+    return `<tr><td><code>${c.id}</code></td><td>${c.tags.join(', ')}</td>` +
+           `<td>${c.description}</td><td>${rb}</td><td>${live}</td></tr>`;
+  }).join('');
+}
+document.getElementById('catFilter').addEventListener('input', drawCatalog);
+document.getElementById('catStatus').addEventListener('change', drawCatalog);
+let catSortDir = 1;
+function sortCat(field) {
+  const key = {id: c => c.id, tags: c => c.tags.join(','),
+               rb: c => c.rule_based && c.rule_based.passed ? 1 : 0,
+               live: c => c.live_recent ? c.live_recent.passed : -1}[field];
+  catalogData.sort((a, b) => (key(a) > key(b) ? 1 : -1) * catSortDir);
+  catSortDir *= -1;
+  drawCatalog();
+}
+
+// ---- replay ----
+let traceFiles = [];
+async function loadTraceFiles() {
+  const r = await fetch('/api/traces');
+  traceFiles = await r.json();
+  const sel = document.getElementById('traceFile');
+  sel.innerHTML = traceFiles.map(f =>
+    `<option value="${f.file}">${f.file} (${f.cases} cases${f.model ? ', ' + f.model : ''})</option>`).join('');
+  if (traceFiles.length) await loadTraceFile(traceFiles[0].file);
+}
+let currentTrace = [];
+async function loadTraceFile(filename) {
+  const r = await fetch('/api/traces/' + encodeURIComponent(filename));
+  currentTrace = (await r.json()).filter(e => !e._meta);
+  drawCaseSelector();
+}
+function drawCaseSelector() {
+  const failOnly = document.getElementById('failOnly').checked;
+  const sel = document.getElementById('traceCase');
+  const rows = currentTrace.filter(e => !failOnly || !e.passed);
+  sel.innerHTML = rows.map(e => `<option value="${e.case_id}">${e.case_id} ${e.passed ? 'PASS' : 'FAIL'}</option>`).join('');
+  if (rows.length) drawReplay(rows[0].case_id);
+}
+function drawReplay(caseId) {
+  const entry = currentTrace.find(e => e.case_id === caseId);
+  document.getElementById('replayTranscript').innerHTML = entry ? renderCaseRun(entry) : '<p class="muted">no data</p>';
+  // "N runs of the same case": list every OTHER trace file that also has this case
+  const others = traceFiles.filter(f => f.file !== document.getElementById('traceFile').value);
+  document.getElementById('repInfo').textContent = others.length
+    ? `${others.length} other captured run(s) exist — switch trace file above to compare` : '';
+}
+document.getElementById('traceFile').addEventListener('change', e => loadTraceFile(e.target.value));
+document.getElementById('traceCase').addEventListener('change', e => drawReplay(e.target.value));
+document.getElementById('failOnly').addEventListener('change', drawCaseSelector);
+
+// ---- live ----
+let liveSessionId = null, livePrevCart = [];
+async function newLiveSession() {
+  const provider = document.getElementById('liveProvider').value;
+  const model = document.getElementById('liveModel').value || null;
+  const r = await fetch('/api/live/session', {method: 'POST', body: JSON.stringify({provider, model})});
+  const data = await r.json();
+  if (data.error) { alert(data.error); return; }
+  liveSessionId = data.session_id;
+  livePrevCart = [];
+  document.getElementById('liveSessionInfo').innerHTML =
+    `session <code>${liveSessionId.slice(0,8)}</code> — provider=<b>${data.provider}</b> model=<b>${data.model || 'n/a'}</b>`;
+  document.getElementById('liveTranscript').innerHTML = '';
+  document.getElementById('banner').innerHTML =
+    `localhost only | live provider: <b>${data.provider}</b> ${data.model ? '/ <b>' + data.model + '</b>' : ''}`;
+}
+async function sendLiveTurn() {
+  if (!liveSessionId) { alert('start a session first'); return; }
+  const input = document.getElementById('liveUtterance');
+  const utterance = input.value.trim();
+  if (!utterance) return;
+  input.value = '';
+  const r = await fetch('/api/live/turn', {method: 'POST',
+    body: JSON.stringify({session_id: liveSessionId, utterance})});
+  const turn = await r.json();
+  if (turn.error) { alert(turn.error); return; }
+  document.getElementById('liveTranscript').insertAdjacentHTML('beforeend', renderTurn(turn, livePrevCart));
+  livePrevCart = (turn.state_after || {}).cart || livePrevCart;
+}
+
+loadCatalog();
+loadTraceFiles();
+</script>
+</body>
+</html>

@@ -1,0 +1,109 @@
+# Corrections, retractions, and replacements — the category EVALS.md flags as
+# where competitors are weakest. Each case proves the cart lands where a human
+# would expect after the customer changes their mind, not just after the last
+# thing they said.
+- id: CORRECT-001
+  tags: [correction, modifier]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large with sausage"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage}}
+    - user: "scratch that, make it pepperoni instead"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: sausage}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: CORRECT-002
+  tags: [correction, size, multi_turn]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "actually make it large"
+      calls:
+        - {tool: update_item, args: {line_id: L1, size: large}}
+    - user: "and add pepperoni"
+      calls:
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+    - user: "no wait, large doesn't work for us tonight, back to medium"
+      calls:
+        - {tool: update_item, args: {line_id: L1, size: medium}}
+  assert_final: {subtotal: "15.50", state: BUILDING}
+
+- id: CORRECT-003
+  tags: [correction, removal]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese and a can of soda"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_item, args: {item: CAN}}
+    - user: "actually skip the soda"
+      calls:
+        - {tool: remove_item, args: {line_id: L2}}
+  assert_final: {subtotal: "11.00", state: BUILDING}
+
+- id: CORRECT-004
+  tags: [correction, replacement, specialty]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium number ten"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: medium, gourmet_number: 10}}
+    - user: "actually give me number eight instead"
+      calls:
+        - {tool: remove_item, args: {line_id: L1}}
+        - {tool: add_item, args: {item: PIZZA, size: medium, gourmet_number: 8}}
+  assert_final: {subtotal: "19.00", state: BUILDING}
+
+- id: CORRECT-005
+  tags: [correction, half, portion]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large half pepperoni half sausage"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_2}}
+    - user: "actually swap those, pepperoni on the other side"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+        - {tool: remove_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_2}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_2}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_1}}
+  assert_final: {subtotal: "21.00", state: BUILDING}
+
+- id: CORRECT-006
+  tags: [correction, order_type, delivery]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese, I'll pick it up"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "actually can you deliver it to 5 Oak St"
+      calls:
+        - {tool: set_order_type, args: {order_type: delivery, address: "5 Oak St"}}
+  assert_final: {subtotal: "13.00", service_charge: "2.00", state: BUILDING}
+
+- id: CORRECT-007
+  tags: [correction, coupon]
+  # T-024: "wings" names no count and this menu has two real SKUs —
+  # genuinely ambiguous, resolved in its own follow-up turn before the
+  # pre-existing coupon-removal correction. Same final subtotal as before.
+  setup: {order_type: pickup}
+  turns:
+    - user: "party size cheese and wings, and I have the three off thirty coupon"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: party}}
+    - user: "the six piece wings, and go ahead with the coupon"
+      calls:
+        - {tool: add_item, args: {item: "6PC WINGS"}}
+        - {tool: apply_coupon, args: {code: OFF_3_AT_30}}
+    - user: "actually forget the coupon"
+      calls:
+        - {tool: remove_coupon, args: {}}
+  assert_final: {subtotal: "34.00", state: BUILDING}

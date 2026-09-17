@@ -1,0 +1,133 @@
+# L1 golden cases. Each `expect_calls` block is a hand-verified label.
+# The runner replays them against the real tools and checks assert_final,
+# which proves the LABEL is correct before any model is scored against it.
+- id: BASIC-001
+  tags: [happy, cheese]
+  setup: {order_type: pickup}
+  turns:
+    - user: "one large cheese pizza"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: MOD-014
+  tags: [modifier, portion, correction]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large pizza, half pepperoni half mushroom"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom, portion: HALF_2}}
+    - user: "add extra cheese to just the pepperoni side"
+      calls:
+        - {tool: add_modifier, args: {line_id: L1, modifier: extra cheese, portion: HALF_1}}
+      forbid: [confirm_order]
+    - user: "actually take the mushrooms off and put sausage there"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: mushroom, portion: HALF_2}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_2}}
+  assert_final: {subtotal: "24.00", state: BUILDING}
+
+- id: MOD-020
+  tags: [modifier, intensity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese with double pepperoni"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, intensity: DOUBLE}}
+  assert_final: {subtotal: "18.00"}
+
+- id: GOURMET-005
+  tags: [gourmet, removal]
+  setup: {order_type: pickup}
+  turns:
+    - user: "gimme a medium number ten, no pineapple"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: medium, gourmet_number: 10}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pineapple, intensity: NONE}}
+  assert_final: {subtotal: "19.00"}
+
+- id: COLLIDE-001
+  tags: [asr_collision, search]
+  # CORRECTED 2026-09-06: this case originally claimed "shrimp scampi" collides
+  # between a $23 pizza and a $20 pasta dish (docs/EVALS.md's documented trap).
+  # Adding the runner's expect_disambiguation check (evals/runner.py) proved
+  # that claim FALSE against the real engine: data/menu.json has no pasta
+  # section at all today, so "shrimp scampi" resolves to exactly one hit
+  # (gourmet #17) and search_menu correctly does not flag it ambiguous. The
+  # pasta-menu gap is real — see docs/STATUS.md Known problems — but this case
+  # must assert what the current canonical menu actually does, not what the
+  # full restaurant menu will eventually need. See COLLIDE-002 for a
+  # collision that IS real against today's data ("chicken" — 6 gourmet
+  # pizzas + the CHICKEN topping + CHICKEN DINNER).
+  setup: {order_type: pickup}
+  turns:
+    - user: "I want the shrimp scampi"
+      calls:
+        - {tool: search_menu, args: {query: shrimp scampi}}
+      forbid: [add_item]
+      expect_disambiguation: false
+  assert_final: {subtotal: null, state: BUILDING}
+
+- id: DELIVERY-001
+  tags: [delivery, address]
+  setup: {order_type: pickup}
+  turns:
+    - user: "actually make it delivery, 51 Hillview Ave, around the back"
+      calls:
+        - {tool: set_order_type, args: {order_type: delivery, address: "51 Hillview Ave", note: "around the back"}}
+    - user: "large cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+  assert_final: {subtotal: "15.00", service_charge: "2.00", total: "18.10"}
+
+- id: TRANSFER-001
+  tags: [transfer, allergy]
+  setup: {order_type: pickup}
+  turns:
+    - user: "does the crust have any gluten? my daughter is celiac"
+      screen: true
+      calls:
+        - {tool: transfer_to_human, args: {reason: allergy}}
+      forbid: [add_item, request_quote, confirm_order]
+  assert_final: {state: TRANSFERRED}
+
+- id: TRANSFER-002
+  tags: [transfer, payment]
+  setup: {order_type: pickup}
+  turns:
+    - user: "let me give you my card, it's 4111 1111 1111 1111"
+      screen: true
+      calls:
+        - {tool: transfer_to_human, args: {reason: payment_card}}
+  assert_final: {state: TRANSFERRED}
+
+- id: AVAIL-001
+  tags: [86, refusal]
+  setup: {order_type: pickup, unavailable: [CLAMS]}
+  turns:
+    - user: "small cheese with clams"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: clams}, expect_error: UNAVAILABLE}
+      forbid: [confirm_order]
+  assert_final: {subtotal: "11.00"}
+
+- id: CONFIRM-001
+  tags: [confirmation, edge]
+  # Ambiguous assent must NOT confirm. This is the single most expensive
+  # failure mode: an order the customer never agreed to.
+  setup: {order_type: pickup}
+  turns:
+    - user: "large cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+    - user: "what's the total"
+      calls:
+        - {tool: request_quote, args: {}}
+    - user: "uh, sure I guess"
+      calls: []
+      forbid: [confirm_order]
+  assert_final: {state: QUOTED}

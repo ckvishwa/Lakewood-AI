@@ -1,0 +1,114 @@
+{
+  "_provenance": "Every value here was read off the store's PrISM POS or the printed menu and verified against 50 real register totals (tests/test_pricing_parity.py, tests/test_pricing.py). Do not edit a number without a screenshot to back it up. This file is the single source of truth for menu/pricing data; lakewood/menu.py loads it and nothing else defines a price.",
+  "store": {
+    "name": "Lakewood Pizza",
+    "address": "562 Lakewood Rd, Waterbury, CT 06704",
+    "pos": "MicroWorks PrISM 8.1.153"
+  },
+  "currency": {
+    "unit": "cents",
+    "tax_rate_numerator": 735,
+    "tax_rate_denominator": 10000,
+    "tax_rounding": "half_up",
+    "tax_base": "taxable_base (subtotal minus any discount)",
+    "delivery_service_charge_cents": 200,
+    "delivery_service_charge_taxed": false,
+    "delivery_minimum_cents": 1800,
+    "delivery_radius_miles": 7
+  },
+  "sizes": {
+    "SMALL":    { "cheese_cents": 1100, "regular_topping_cents": 200, "premium_topping_cents": 250, "gourmet_cents": 1600 },
+    "MEDIUM":   { "cheese_cents": 1300, "regular_topping_cents": 250, "premium_topping_cents": 300, "gourmet_cents": 1900 },
+    "LARGE":    { "cheese_cents": 1500, "regular_topping_cents": 300, "premium_topping_cents": 350, "gourmet_cents": 2300 },
+    "XLARGE":   { "cheese_cents": 1700, "regular_topping_cents": 350, "premium_topping_cents": 400, "gourmet_cents": 2500 },
+    "SICILIAN": { "cheese_cents": 1800, "regular_topping_cents": 300, "premium_topping_cents": 400, "gourmet_cents": 2400 },
+    "PARTY":    { "cheese_cents": 2600, "regular_topping_cents": 400, "premium_topping_cents": 500, "gourmet_cents": 3600 }
+  },
+  "topping_tiers": {
+    "premium": [
+      "CLAMS", "RICOTTA", "SUNDRIED TOMATO", "CHICKEN", "FETA", "STEAK", "SHRIMP"
+    ],
+    "regular": [
+      "MOZZARELLA", "ONIONS", "PEPPERS", "MUSHROOMS", "BROCCOLI", "SPINACH",
+      "BLACK OLIVES", "TOMATOES", "EGGPLANT", "PEPPERONI", "SAUSAGE", "BACON",
+      "MEATBALLS", "HAM", "JALAPENO", "RSTD RED PEPPR", "ANCHOVIES",
+      "PARMESAN CHEESE", "FRESH MOZZARELLA", "PINEAPPLE", "ARTICHOKE", "GARLIC"
+    ],
+    "free": [
+      "WHITE SAUCE", "RED SAUCE", "PESTO SAUCE", "BBQ", "BASIL", "ALFREDO",
+      "OLIVE OIL", "HOT SAUCE", "STEAK SAUCE"
+    ],
+    "unknown": []
+  },
+  "flat_modifiers_cents": {
+    "SIDE RANCH": 25,
+    "SIDE BLUE CHEESE": 25
+  },
+  "gourmet_pizzas": {
+    "1": "Clams Casino", "2": "Florentine Pizza", "3": "Chicken & Broccoli Alfredo",
+    "4": "Broccoli Bianca", "5": "Bruschetta", "6": "Vegetarian", "7": "Italiano",
+    "8": "BBQ Chicken", "9": "Seafood Pizza", "10": "Hawaiian", "11": "Sweet & Spicy",
+    "12": "Mona Lisa", "13": "Mediterranean", "14": "Hot American",
+    "15": "Chicken Cacciatore", "16": "Italian Flag", "17": "Shrimp Scampi",
+    "18": "Margarita", "19": "Sorrentino", "20": "Chicken Bacon Ranch",
+    "21": "Chicken Pesto", "22": "Shrimp & Broccoli", "23": "Chicken Florentine",
+    "24": "Philly Steak", "25": "Buffalo Chicken", "26": "Meat Lovers",
+    "27": "Lakewood Special"
+  },
+  "gourmet_sicilian_overrides": {},
+  "non_pizza_items": {
+    "6PC WINGS": 800, "12PC WINGS": 1400,
+    "GRINDER": 1200, "ROLL": 700, "GRINDER EXTRA": 25,
+    "CALZONE": 1000, "STROMBOLI": 1000, "CALZONE ITEM": 200,
+    "GARDEN SALAD SM": 500, "GARDEN SALAD LG": 800,
+    "SALAD SM": 900, "SALAD LG": 1200, "EXTRA DRESSING": 100,
+    "BLUE CHEESE CUP": 100,
+    "CHEESEBURGER": 1000, "HAMBURGER": 900,
+    "BACON CHEESEBURGER": 1100, "DOUBLE CHEESEBURGER": 1300,
+    "WRAP": 1200, "CHICKEN DINNER": 1900,
+    "CHEESECAKE": 450, "STRWBRY CHZCAKE": 500,
+    "TIRAMISU": 500, "CHOCOLATE CAKE": 500,
+    "CAN": 150, "20OZ": 275, "2LITER": 400
+  },
+  "hours": {
+    "0": null,
+    "1": [11, 22],
+    "2": [11, 22],
+    "3": [11, 22],
+    "4": [11, 22],
+    "5": [11, 22],
+    "6": [12, 21]
+  },
+  "coupons": [
+    {
+      "code": "COMBO_27",
+      "description": "Large 1-topping pizza + 6 wings + 2-liter soda for $27",
+      "bundle_price_cents": 2700,
+      "verified": "printed on menu; discount arithmetic confirmed by tests/test_coupons.py::test_combo_27 ($30 cart -> $3 off -> $28.98 total)",
+      "tax_ordering_verified": false
+    },
+    {
+      "code": "FREE_2L",
+      "description": "Buy 2 large pizzas, get a 2-liter soda free",
+      "discount_cents": 400,
+      "verified": "printed on menu; discount confirmed by tests/test_coupons.py::test_free_two_liter_with_two_large",
+      "tax_ordering_verified": false
+    },
+    {
+      "code": "OFF_5_AT_50",
+      "description": "$5 off any order of $50 or more",
+      "discount_cents": 500,
+      "threshold_cents": 5000,
+      "verified": "printed on menu; discount confirmed by tests/test_coupons.py::test_five_off_fifty_beats_three_off_thirty",
+      "tax_ordering_verified": false
+    },
+    {
+      "code": "OFF_3_AT_30",
+      "description": "$3 off any order of $30 or more",
+      "discount_cents": 300,
+      "threshold_cents": 3000,
+      "verified": "printed on menu; discount + tax value confirmed by tests/test_coupons.py::test_three_off_thirty",
+      "tax_ordering_verified": false
+    }
+  ]
+}

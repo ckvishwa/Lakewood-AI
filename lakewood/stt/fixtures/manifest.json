@@ -1,0 +1,55 @@
+{
+  "_provenance": "SYNTHESIZED via Windows SAPI (System.Speech.Synthesis), not human-recorded — no microphone/human-recording capability in this environment. This is a real, honest limitation: TTS audio is far cleaner than real customer speech (no accent variation, no background noise, no disfluency, no phone-line compression). These fixtures prove the STT plumbing and the domain-weighted scoring method work end to end; they do not substitute for real customer audio before any accuracy claim. See docs/decisions/ADR-008-local-stt-runtime.md and docs/STATUS.md.",
+  "cases": [
+    {
+      "id": "negation_no_onions",
+      "expected_transcript": "Large pepperoni, no onions.",
+      "domain_words": {"sizes": ["large"], "toppings": ["pepperoni", "onions"], "negations": ["no"], "quantities": [], "scope": []}
+    },
+    {
+      "id": "half_and_half_toppings",
+      "expected_transcript": "Medium half pepperoni half mushroom.",
+      "domain_words": {"sizes": ["medium"], "toppings": ["pepperoni", "mushroom"], "negations": [], "quantities": [], "scope": ["half"]}
+    },
+    {
+      "id": "correction_size",
+      "expected_transcript": "Actually, make that a large instead of medium.",
+      "domain_words": {"sizes": ["large", "medium"], "toppings": [], "negations": [], "quantities": [], "scope": []}
+    },
+    {
+      "id": "quantity_two",
+      "expected_transcript": "Two large cheese pizzas.",
+      "domain_words": {"sizes": ["large"], "toppings": ["cheese"], "negations": [], "quantities": ["two"], "scope": []}
+    },
+    {
+      "id": "intensity_light_sauce",
+      "expected_transcript": "Give me a small with extra cheese, light sauce.",
+      "domain_words": {"sizes": ["small"], "toppings": ["cheese", "sauce"], "negations": [], "quantities": [], "scope": ["extra", "light"]}
+    },
+    {
+      "id": "left_right_scope",
+      "expected_transcript": "Pepperoni on the left, sausage on the right.",
+      "domain_words": {"sizes": [], "toppings": ["pepperoni", "sausage"], "negations": [], "quantities": [], "scope": ["left", "right"]}
+    },
+    {
+      "id": "negation_correction",
+      "expected_transcript": "No, wait, remove the mushrooms.",
+      "domain_words": {"sizes": [], "toppings": ["mushrooms"], "negations": ["no", "remove"], "quantities": [], "scope": []}
+    },
+    {
+      "id": "quantity_items",
+      "expected_transcript": "Six wings and a two liter.",
+      "domain_words": {"sizes": [], "toppings": [], "negations": [], "quantities": ["six", "two liter"], "scope": []}
+    },
+    {
+      "id": "size_intensity",
+      "expected_transcript": "Large sicilian with double pepperoni.",
+      "domain_words": {"sizes": ["large", "sicilian"], "toppings": ["pepperoni"], "negations": [], "quantities": [], "scope": ["double"]}
+    },
+    {
+      "id": "half_and_half_by_number",
+      "expected_transcript": "Half number eight and half number ten, large.",
+      "domain_words": {"sizes": ["large"], "toppings": [], "negations": [], "quantities": ["eight", "ten"], "scope": ["half"]}
+    }
+  ]
+}

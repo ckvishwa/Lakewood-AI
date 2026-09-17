@@ -1,0 +1,124 @@
+# T-015: negation/exclusion/light-intensity coverage — whole-pizza and
+# half-scoped, both the "never charged in the first place" preventive path
+# and the "was charged, now removed" retroactive path (price DOES change
+# for the latter, does NOT for the former — see docs/STATUS.md T-015
+# coverage-gap diagnosis for why `validate` alone could never have caught
+# the original bug this fixes, and why these cases also need `score` —
+# real RuleBasedInterpreter/LLMInterpreter execution, not hand-authored
+# calls — to mean anything as regression protection).
+- id: NEG-001
+  tags: [negation, removal]
+  # The exact original bug: "no onions" must never charge for onions.
+  # Before the T-015 fix, RuleBasedInterpreter would have produced
+  # add_modifier(onions, WHOLE) here — a full $3.00 charge — instead of
+  # add_modifier(onions, intensity=NONE). This case's `calls` reflect the
+  # CORRECT (fixed) behavior; `score --adapter rule_based` proves the real
+  # interpreter now actually produces it.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large pepperoni, no onions."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: onions, portion: WHOLE, intensity: NONE}}
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: NEG-002
+  tags: [negation]
+  setup: {order_type: pickup}
+  turns:
+    - user: "Medium cheese, without mushrooms."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom, portion: WHOLE, intensity: NONE}}
+  assert_final: {subtotal: "13.00", state: BUILDING}
+
+- id: NEG-003
+  tags: [negation]
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large, hold the onions."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: onions, portion: WHOLE, intensity: NONE}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: NEG-004
+  tags: [negation, removal, correction]
+  # Retroactive removal — the topping WAS a real charge ($3.00), so this is
+  # the "negation changes the price" case: $18.00 -> $15.00. Deliberately
+  # phrased "take the mushrooms off" (not "no mushrooms") to prove both
+  # phrasings resolve to the same correct operation once the topping's
+  # real charged/not-charged state is known — see _resolve_intensity_calls.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large cheese with mushrooms."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom, portion: WHOLE}}
+    - user: "actually take the mushrooms off"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: mushroom, portion: WHOLE}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: NEG-005
+  tags: [negation, lite, correction]
+  # Lite-downgrade of an EXISTING charged topping — distinct from full
+  # negation: the customer still wants pepperoni, just lighter. A plain
+  # remove_modifier (like NEG-004) would drop it entirely, which is wrong
+  # here. Price changes: $18.00 -> $15.00 (LITE is free, same as NONE).
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large cheese with pepperoni."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE}}
+    - user: "actually make the pepperoni light"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE, intensity: LITE}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: NEG-006
+  tags: [negation, half]
+  # Half-scoped negation: the excluded topping never charges regardless of
+  # which half it's excluded from.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large pepperoni, no cheese on one half."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: cheese, portion: HALF_1, intensity: NONE}}
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: NEG-007
+  tags: [negation, half]
+  # Task's own named example: bare "half X" (no "on") plus "that half"
+  # (anaphoric to the half just named) must resolve deterministically to
+  # the SAME half, not a guess.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large half pepperoni, no cheese on that half."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: cheese, portion: HALF_1, intensity: NONE}}
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: NEG-008
+  tags: [negation, ambiguous]
+  # A bare negation trigger word with no recognizable topping must never
+  # fabricate a call against anything — "prefer clarification over
+  # guessing" (CLAUDE.md), here realized as a safe no-op rather than a
+  # forced clarification question, since nothing in the sentence names a
+  # menu item to ask about.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large cheese."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+    - user: "no, wait, that's fine"
+      calls: []
+      forbid: [add_modifier, remove_modifier]
+  assert_final: {subtotal: "15.00", state: BUILDING}

@@ -1,0 +1,107 @@
+# Invalid/unavailable items and requests that must trigger disambiguation.
+# Every "not found" case proves the engine refuses cleanly (F7) rather than
+# guessing — never softened to make a case pass.
+- id: AVAIL-002
+  tags: [86, refusal, specialty]
+  setup: {order_type: pickup, unavailable: ["#5"]}
+  turns:
+    - user: "small number five"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: small, gourmet_number: 5}, expect_error: UNAVAILABLE}
+      forbid: [request_quote, confirm_order]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: INVALID-001
+  tags: [invalid, item_not_found]
+  setup: {order_type: pickup}
+  turns:
+    - user: "do you have chicken tenders"
+      calls:
+        - {tool: search_menu, args: {query: "chicken tenders"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: INVALID-002
+  tags: [invalid, topping_not_found]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese with truffle oil"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: "truffle oil"}, expect_error: TOPPING_NOT_FOUND}
+      forbid: [confirm_order]
+  assert_final: {subtotal: "11.00", state: BUILDING}
+
+- id: INVALID-003
+  tags: [invalid, gourmet_not_found]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small number thirty"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: small, gourmet_number: 30}, expect_error: GOURMET_NOT_FOUND}
+      forbid: [request_quote, confirm_order]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: COLLIDE-002
+  tags: [asr_collision, disambiguation]
+  # A real collision against the CURRENT menu (unlike the shrimp-scampi case
+  # this replaces conceptually — see the note on COLLIDE-001): "chicken"
+  # matches 6 gourmet pizzas, the CHICKEN topping, and CHICKEN DINNER.
+  # Category must be resolved before the item name.
+  setup: {order_type: pickup}
+  turns:
+    - user: "I want the chicken"
+      calls:
+        - {tool: search_menu, args: {query: chicken}}
+      forbid: [add_item]
+      expect_disambiguation: true
+  assert_final: {subtotal: null, state: BUILDING}
+
+- id: DECLINE-001
+  tags: [disambiguation, confirmation]
+  # T-024: covers T-023's decline_item tool, which nothing in the corpus
+  # exercised before this case. The customer abandons an ambiguous item
+  # entirely rather than answering it — F17's block on begin_confirmation
+  # must lift once explicitly declined (ADR-012), same as a genuine
+  # resolution would. Wings has two real SKUs (6PC/12PC) and no count was
+  # given, so search_menu is genuinely ambiguous here, not a search-quality
+  # artifact.
+  setup: {order_type: pickup}
+  turns:
+    - user: "a large pepperoni pizza and an order of wings"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+        - {tool: search_menu, args: {query: wings}}
+    - user: "actually forget the wings, just the pizza"
+      calls:
+        - {tool: decline_item, args: {query: wings}}
+        - {tool: request_quote, args: {}}
+        - {tool: begin_confirmation, args: {}}
+  assert_final: {subtotal: "18.00", state: AWAITING_CONFIRMATION}
+
+- id: DISAMBIG-CAP-001
+  tags: [disambiguation, transfer, edge]
+  # T-024/F18: a clarification that goes unanswered across
+  # MAX_DISAMBIGUATION_ASKS turns must transfer to a human rather than loop
+  # forever. The mechanism itself (ask_count, the cap, chat.py's guard) is
+  # unit-tested directly and offline in tests/test_disambiguation_guard.py
+  # — validate() replays calls directly and never runs chat.py, so it has
+  # no way to see ask_count increment. This label authors the guard's own
+  # deterministic eventual action explicitly (turn 3's transfer_to_human is
+  # not a literal response to "do you deliver" — it is what F18 forces once
+  # the cap is reached, regardless of what the customer says next), so
+  # score() has a labeled shape that agrees with what a real interpreter
+  # under the guard will reach after two unanswered asks.
+  setup: {order_type: pickup}
+  turns:
+    - user: "an order of wings"
+      calls:
+        - {tool: search_menu, args: {query: wings}}
+    - user: "what are your hours"
+      calls:
+        - {tool: get_store_info, args: {fields: ["hours"]}}
+    - user: "do you deliver"
+      calls:
+        - {tool: transfer_to_human, args: {reason: repeated_misunderstanding}}
+  assert_final: {state: TRANSFERRED}

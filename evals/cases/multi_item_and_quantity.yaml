@@ -1,0 +1,150 @@
+# Multi-item carts, quantities, and size/quantity changes. None of these
+# exercise a new pricing rule — every subtotal here is a straight sum of
+# already-verified per-item prices (see tests/test_pricing_parity.py).
+- id: MULTI-001
+  tags: [multi_item, happy]
+  setup: {order_type: pickup}
+  turns:
+    - user: "one small cheese and one medium cheese pizza"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+  assert_final: {subtotal: "24.00", state: BUILDING}
+
+- id: MULTI-002
+  tags: [multi_item]
+  # T-024: "an order of wings" names no count, and this menu has two real
+  # SKUs (6PC/12PC) — genuinely ambiguous, not a search-quality artifact
+  # (unlike "a two liter," which specifically names its size and stays a
+  # single-turn add). T-022's own diagnosis (MULTI-002, 5/5 across two live
+  # runs) found a live model asks about this instead of guessing; this case
+  # now gives that a follow-up turn to answer, rather than ending
+  # mid-clarification. The customer's final choice (six-piece) keeps the
+  # subtotal identical to before — this is not a relabeling, only a
+  # correctly-sequenced path to the same already-verified total.
+  setup: {order_type: pickup}
+  turns:
+    - user: "a large pepperoni pizza, an order of wings, and a two liter"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+        - {tool: add_item, args: {item: "2LITER"}}
+    - user: "the six piece is fine"
+      calls:
+        - {tool: add_item, args: {item: "6PC WINGS"}}
+  assert_final: {subtotal: "30.00", state: BUILDING}
+
+- id: MULTI-003
+  tags: [multi_item, quantity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "two large cheese pizzas"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large, quantity: 2}}
+  assert_final: {subtotal: "30.00", state: BUILDING}
+
+- id: MULTI-004
+  tags: [multi_item, quantity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "one cheesecake and two strawberry cheesecakes"
+      calls:
+        - {tool: add_item, args: {item: CHEESECAKE, quantity: 1}}
+        - {tool: add_item, args: {item: "STRWBRY CHZCAKE", quantity: 2}}
+  assert_final: {subtotal: "14.50", state: BUILDING}
+
+- id: QTY-001
+  tags: [quantity, correction]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese pizza"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "actually make that two"
+      calls:
+        - {tool: update_item, args: {line_id: L1, quantity: 2}}
+  assert_final: {subtotal: "26.00", state: BUILDING}
+
+- id: QTY-002
+  tags: [quantity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "three medium cheese pizzas"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium, quantity: 3}}
+  assert_final: {subtotal: "39.00", state: BUILDING}
+
+- id: SIZE-001
+  tags: [size, correction]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "actually make it large instead"
+      calls:
+        - {tool: update_item, args: {line_id: L1, size: large}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: SIZE-002
+  tags: [size, correction, specialty]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small number ten"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: small, gourmet_number: 10}}
+    - user: "make that a large"
+      calls:
+        - {tool: update_item, args: {line_id: L1, size: large}}
+  assert_final: {subtotal: "23.00", state: BUILDING}
+
+- id: MULTI-005
+  tags: [multi_item, delivery]
+  setup: {order_type: pickup}
+  turns:
+    - user: "deliver this to 10 Main St"
+      calls:
+        - {tool: set_order_type, args: {order_type: delivery, address: "10 Main St"}}
+    - user: "large cheese and a twelve piece wings"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_item, args: {item: "12PC WINGS"}}
+    - user: "what's my total"
+      calls:
+        - {tool: request_quote, args: {}}
+  assert_final: {subtotal: "29.00", service_charge: "2.00", total: "33.13", state: QUOTED}
+
+- id: MULTI-006
+  tags: [multi_item]
+  setup: {order_type: pickup}
+  turns:
+    - user: "party size cheese pizza, twelve piece wings, and two cheesecakes"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: party}}
+        - {tool: add_item, args: {item: "12PC WINGS"}}
+        - {tool: add_item, args: {item: CHEESECAKE, quantity: 2}}
+  assert_final: {subtotal: "49.00", state: BUILDING}
+
+- id: QTY-003
+  tags: [quantity, invalid]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+    - user: "actually make that zero"
+      calls:
+        - {tool: update_item, args: {line_id: L1, quantity: 0}, expect_error: BAD_QUANTITY}
+  assert_final: {subtotal: "11.00", state: BUILDING}
+
+- id: SIZE-003
+  tags: [size, invalid]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "change the size to jumbo"
+      calls:
+        - {tool: update_item, args: {line_id: L1, size: jumbo}, expect_error: SIZE_NOT_FOUND}
+  assert_final: {subtotal: "13.00", state: BUILDING}

@@ -1,0 +1,696 @@
+"""Customer text to the existing structured ToolCall contract.
+
+RuleBasedInterpreter proposes calls for chat.py; LLMInterpreter executes the
+same orders.TOOLS against a staged session and reports already_executed calls.
+All menu, pricing and state validation remains in the deterministic engine.
+The default rule-based mode needs no credentials or network access.
+"""
+
+from __future__ import annotations
+
+import copy
+import inspect
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Optional, Protocol
+
+from . import orders as oe
+from .llm_provider import LLMProvider, ProviderCallError, make_provider
+from .menu import GOURMET_ROUND, SIZES
+
+# The real, single tool surface every interpreter (rule-based or LLM) must go
+# through — never a parallel/duplicated copy. Introspected once here so a
+# tool schema generator (LLMInterpreter) and the executor (chat.py) share the
+# exact same set orders.py itself defines.
+TOOLS = {f.__name__: f for f in oe.TOOLS}
+
+
+def substitute_last_line(args: dict, last_new_line_id):
+    """Resolve the "$LAST" convention both interpreters use for a line_id
+    that doesn't exist yet at interpretation time — the pizza this same
+    batch of calls is about to create via add_item."""
+    return {k: (last_new_line_id if v == "$LAST" else v) for k, v in args.items()}
+
+
+@dataclass
+class ToolCall:
+    tool: str
+    args: dict = field(default_factory=dict)
+
+
+@dataclass
+class Interpretation:
+    """What one turn produced. Exactly one of:
+    - `calls`: tool calls the executor (chat.py) should run, in order. This
+      is what RuleBasedInterpreter always uses — it never executes anything
+      itself.
+    - `already_executed`: `[{"tool","args","result"}]` calls an interpreter
+      ran ITSELF (against the real tools, same as the executor would) and is
+      reporting back. LLMInterpreter uses this — the Anthropic tool-use
+      protocol requires seeing each call's real result before the turn is
+      complete (to send back a matching tool_result block), so by the time
+      `interpret()` returns, the calls already happened for real. The
+      executor must not re-run them.
+    - `say`: a message to show WITHOUT running a tool — a clarification
+      question or plain acknowledgement. Never combined with a guessed call;
+      if unsure, `calls`/`already_executed` are empty and `say` asks.
+    """
+    calls: list[ToolCall] = field(default_factory=list)
+    already_executed: list[dict] = field(default_factory=list)
+    say: Optional[str] = None
+
+
+class TextInterpreter(Protocol):
+    def interpret(self, chat: "ChatState", text: str) -> Interpretation: ...
+
+
+# ---------------------------------------------------------------------------
+# ChatState — the conversational bookkeeping that isn't already authoritative
+# on orders.Session. Cart, quote_id, state, and total are NOT duplicated here
+# — they live on `session` and nothing else. This only tracks what turn N
+# needs to resolve turn N+1's pronouns ("it", "one half", "the pizza"), or
+# (llm_history) what an LLM needs to remember its own prior turns.
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ChatState:
+    session: oe.Session
+    last_line_id: Optional[str] = None
+    pending_clarification: Optional[list[dict]] = None  # search_menu hits
+    llm_history: list = field(default_factory=list)     # LLMInterpreter only
+    tool_executor: object | None = field(default=None, repr=False)
+
+
+# ---------------------------------------------------------------------------
+# Vocabulary — built from the SAME constants orders.py resolves against, so
+# this module can never recognize an item the domain engine wouldn't. It only
+# ever narrows "does this utterance plausibly mention a size/topping", never
+# decides an item is valid — add_item/add_modifier still do that for real.
+# ---------------------------------------------------------------------------
+
+_TOPPING_VOCAB = sorted(
+    {t.lower() for t in oe.ALL_TOPPINGS} | set(oe.ALIASES.keys()),
+    key=len, reverse=True,
+)
+_SIZE_VOCAB = sorted(
+    {s.lower() for s in SIZES} | set(oe.SIZE_ALIASES.keys()),
+    key=len, reverse=True,
+)
+# Bare "cheese" is a real alias for MOZZARELLA (a customer can ask to "add
+# cheese"), but "large cheese [pizza]" means the base item, not an extra
+# topping — CHEESE PIZZA is already the item add_item creates. Excluded from
+# plain new-pizza clause scanning; "extra cheese" (a distinct, longer phrase)
+# still works, and so does bare "cheese" when qualified by negation/lite
+# ("no cheese on that half" is a real exclusion request, not a base-item
+# mention) — see _new_pizza's clause loop.
+_NEW_PIZZA_TOPPING_VOCAB = [p for p in _TOPPING_VOCAB if p != "cheese"]
+
+# Common branded/generic drink words -> a REAL, verified NON_PIZZA key. Not a
+# menu fabrication: "coke"/"soda" aren't SKUs on this menu, but "CAN" is, and
+# defaulting a bare drink mention to the smallest real size is the one
+# deliberate guess this interpreter makes — a low-stakes, trivially
+# correctable default, unlike guessing a pizza topping or price ever would
+# be. See docs/STATUS.md Known problems for the honest caveat.
+_DRINK_WORDS = {
+    "coke": "CAN", "pepsi": "CAN", "soda": "CAN", "pop": "CAN", "can": "CAN",
+    "two liter": "2LITER", "2 liter": "2LITER", "2-liter": "2LITER",
+    "bottle": "20OZ", "20 oz": "20OZ", "20oz": "20OZ",
+}
+
+_CONFIRM_RE = re.compile(
+    r"\b(yes|yeah|yep|sure).{0,20}\b(place|confirm|go ahead)\b"
+    r"|\bplace (my |the )?order\b|\bconfirm (it|my order)\b|\bgo ahead\b",
+    re.I)
+_DONE_RE = re.compile(
+    r"\bthat'?s (it|all)\b|\bnothing else\b|\bthat'?ll be all\b", re.I)
+_QUOTE_RE = re.compile(
+    r"\bwhat'?s (my|the) total\b|\bhow much\b|\bwhat do i owe\b", re.I)
+_REPLACE_RE = re.compile(
+    r"\breplace (?:the )?(?P<old>[\w ]+?) with (?:a |an )?(?P<new>[\w ]+)\b", re.I)
+_SWAP_RE = re.compile(
+    r"\bswap (?:the )?(?P<old>[\w ]+?) for (?:a |an )?(?P<new>[\w ]+)\b", re.I)
+_HH_BY_NUMBER_RE = re.compile(
+    # \D (non-digit), not `.`, for the filler — `.` would greedily eat into
+    # a two-digit number itself (e.g. "half number 10" -> n captured as "0").
+    r"\bhalf\D{0,10}?(?P<n1>\d{1,2})\D{0,20}?half\D{0,10}?(?P<n2>\d{1,2})\b", re.I)
+_HALF_A_HALF_B_RE = re.compile(
+    r"\bhalf (?P<a>[\w ]+?) half (?P<b>[\w ]+)\b", re.I)
+_ONE_HALF_RE = re.compile(
+    r"\bon(?:ly)? (?:one|a) (?:half|side)\b|\bon (?:that|this) (?:half|side)\b", re.I)
+_OTHER_HALF_RE = re.compile(r"\b(?:on )?the other (?:half|side)\b", re.I)
+# Bare "half X" (no "on") — "half pepperoni, no cheese on that half" names
+# the pepperoni's half without ever saying "on". Checked only when neither
+# of the two patterns above already matched; _new_pizza assigns HALF_1 to
+# the first such clause in an utterance and HALF_2 to the next, so "half
+# pepperoni half sausage" (as two SEPARATE clauses, not the classic
+# _HALF_A_HALF_B_RE single-clause form) still lands on opposite halves.
+_BARE_HALF_RE = re.compile(r"\bhalf\b", re.I)
+
+# T-015: negation/exclusion phrasing. Deliberately unified — "no X",
+# "without X", "hold the X", "leave X off"/"leave off X", "take X off"/
+# "take off X", and "minus X" are all treated as the SAME intent (fully
+# exclude X, at $0), regardless of whether the customer's grammar is
+# preventive ("no cheese") or retroactive ("take the cheese off"). See
+# _resolve_topping_intensity for why: which of the two existing tool
+# operations this becomes (remove_modifier vs. add_modifier NONE) depends on
+# whether X is currently a real charged topping on the line, not on tense.
+_NEGATION_RE = re.compile(
+    r"\bno\b|\bwithout\b|\bhold the\b|\bhold\b|\bminus\b"
+    r"|\bleave\b.*\boff\b|\btake\b.*\boff\b", re.I)
+# "light X"/"easy on X" — a distinct, separately-priced-as-free intensity
+# (LITE), not full exclusion. Never conflated with negation.
+_LITE_RE = re.compile(r"\blight\b|\beasy on\b", re.I)
+
+
+def _find_vocab(text: str, vocab: list[str]) -> Optional[str]:
+    """First (longest-first) vocabulary phrase literally present in text."""
+    for phrase in vocab:
+        if re.search(rf"\b{re.escape(phrase)}\b", text):
+            return phrase
+    return None
+
+
+def _find_drink(text: str) -> Optional[str]:
+    for word, key in _DRINK_WORDS.items():
+        if re.search(rf"\b{re.escape(word)}\b", text):
+            return key
+    return None
+
+
+class RuleBasedInterpreter:
+    """
+    Deterministic, no-network, no-credentials interpreter. Handles the
+    phrasings T-012 requires (see docs/STATUS.md T-012 milestone) and a
+    reasonable spread of the golden corpus's phrasing. Not an NLU system —
+    a fixed, ordered set of pattern checks, each of which either produces
+    tool calls or a clarification, never both a guess and a hedge.
+    """
+
+    def interpret(self, chat: ChatState, text: str) -> Interpretation:
+        # Strip sentence punctuation but keep commas — clause-splitting in
+        # _new_pizza depends on them to scope a half-modifier to the right
+        # topping ("pepperoni, mushroom only on one half" must not leak
+        # "one half" onto pepperoni).
+        t = re.sub(r"[.!?]+", "", text.strip().lower())
+        sess = chat.session
+
+        # 0. Answering a pending clarification from the previous turn.
+        if chat.pending_clarification is not None:
+            resolved = self._resolve_clarification(chat, t)
+            if resolved is not None:
+                return resolved
+            # Didn't recognize the answer — keep asking rather than guess.
+            return Interpretation(say="Sorry, which one did you mean?")
+
+        # 1. Explicit confirmation.
+        if _CONFIRM_RE.search(t):
+            return self._confirm(sess)
+
+        # 2. "that's it" — done adding, not yet a confirmation.
+        if _DONE_RE.search(t):
+            if not sess.order.lines:
+                return Interpretation(say="You haven't added anything yet.")
+            return Interpretation(calls=[ToolCall("request_quote")])
+
+        # 3. Quote / total question.
+        if _QUOTE_RE.search(t):
+            if not sess.order.lines:
+                return Interpretation(say="Your cart is empty right now.")
+            return Interpretation(calls=[ToolCall("request_quote")])
+
+        # 4. Correction: "replace X with Y" / "swap X for Y".
+        m = _REPLACE_RE.search(t) or _SWAP_RE.search(t)
+        if m:
+            return self._replace_modifier(chat, m.group("old"), m.group("new"))
+
+        # 5. HALF_AND_HALF SKU by specialty number — "half #8 half #10".
+        m = _HH_BY_NUMBER_RE.search(t)
+        if m:
+            return self._half_and_half_by_number(
+                chat, t, int(m.group("n1")), int(m.group("n2")))
+
+        # 6. Classic "half A half B" phrasing at pizza creation.
+        size = _find_vocab(t, _SIZE_VOCAB)
+        m = _HALF_A_HALF_B_RE.search(t)
+        if m and size:
+            return self._new_pizza_half_a_half_b(chat, size, m.group("a"), m.group("b"))
+
+        # 7. Generic drink mention.
+        drink_key = _find_drink(t)
+        if drink_key and not size:
+            return Interpretation(calls=[ToolCall("add_item", {"item": drink_key})])
+
+        # 8. Size (+ optional toppings) — start a new pizza.
+        if size:
+            return self._new_pizza(chat, t, size)
+
+        # 9. Bare topping mention on an already-open pizza line — including
+        # negation/lite said as its own follow-up turn ("no onions" after
+        # the pizza already exists), not just at creation time.
+        topping = _find_vocab(t, _TOPPING_VOCAB)
+        if topping and chat.last_line_id:
+            # Canonicalize BEFORE comparing against Topping.name (always
+            # stored canonical/uppercase) — _find_vocab returns the raw
+            # lowercase vocab phrase, which add_modifier alone would resolve
+            # on its own, but _resolve_intensity_calls's own existing-
+            # topping check needs the same canonical form to match at all.
+            topping = oe.ALIASES.get(topping, topping.upper())
+            portion = "HALF_1" if _ONE_HALF_RE.search(t) else (
+                "HALF_2" if _OTHER_HALF_RE.search(t) else "WHOLE")
+            intensity = "NONE" if _NEGATION_RE.search(t) else (
+                "LITE" if _LITE_RE.search(t) else "NORMAL")
+            return Interpretation(calls=self._resolve_intensity_calls(
+                chat, chat.last_line_id, topping, portion, intensity))
+
+        # 10. Fall through to a real menu lookup — never guess an item.
+        query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
+        query = re.sub(r"\s+", " ", query).strip() or t
+        return Interpretation(calls=[ToolCall("search_menu", {"query": query})],
+                              say=None)
+
+    # -- helpers --------------------------------------------------------
+
+    def _confirm(self, sess: oe.Session) -> Interpretation:
+        # T-019/F14: begin_confirmation and confirm_order must land in
+        # separate turns — the customer has to hear the readback and
+        # respond again before it's final. From QUOTED this call only opens
+        # the window; the customer's NEXT affirmative (matched by this same
+        # _CONFIRM_RE, now with the state AWAITING_CONFIRMATION) is what
+        # actually confirms, via the branch directly below.
+        if sess.state == "QUOTED":
+            return Interpretation(calls=[ToolCall("begin_confirmation")])
+        if sess.state == "AWAITING_CONFIRMATION":
+            return Interpretation(calls=[
+                ToolCall("confirm_order", {"quote_id": sess.quote_id})])
+        if sess.state == "BUILDING":
+            return Interpretation(say="Want me to get your total first?")
+        return Interpretation(say="There's nothing pending to confirm.")
+
+    def _replace_modifier(self, chat: ChatState, old: str, new: str) -> Interpretation:
+        old, new = old.strip(), new.strip()
+        old_name = oe.ALIASES.get(old, old.upper())
+        new_name = oe.ALIASES.get(new, new.upper())
+        line_id = chat.last_line_id
+        if not line_id:
+            return Interpretation(say="Which pizza is that on?")
+        line = chat.session.lines.get(line_id)
+        portion = "WHOLE"
+        if line is not None:
+            for top in getattr(line, "toppings", []):
+                if top.name == old_name:
+                    portion = top.portion
+                    break
+        return Interpretation(calls=[
+            ToolCall("remove_modifier", {"line_id": line_id, "modifier": old_name,
+                                         "portion": portion}),
+            ToolCall("add_modifier", {"line_id": line_id, "modifier": new_name,
+                                      "portion": portion}),
+        ])
+
+    def _half_and_half_by_number(self, chat: ChatState, t: str,
+                                 n1: int, n2: int) -> Interpretation:
+        size = _find_vocab(t, _SIZE_VOCAB)
+        if not size:
+            chat.pending_clarification = [{"kind": "size_needed", "n1": n1, "n2": n2}]
+            return Interpretation(say="What size would you like?")
+        return Interpretation(calls=[ToolCall("add_item", {
+            "item": "PIZZA", "size": size,
+            "gourmet_number": n1, "second_gourmet_number": n2,
+        })])
+
+    def _new_pizza_half_a_half_b(self, chat: ChatState, size: str,
+                                 a: str, b: str) -> Interpretation:
+        a_name = oe.ALIASES.get(a.strip(), a.strip().upper())
+        b_name = oe.ALIASES.get(b.strip(), b.strip().upper())
+        return Interpretation(calls=[
+            ToolCall("add_item", {"item": "CHEESE PIZZA", "size": size}),
+            ToolCall("add_modifier", {"line_id": "$LAST", "modifier": a_name,
+                                      "portion": "HALF_1"}),
+            ToolCall("add_modifier", {"line_id": "$LAST", "modifier": b_name,
+                                      "portion": "HALF_2"}),
+        ])
+
+    def _new_pizza(self, chat: ChatState, t: str, size: str) -> Interpretation:
+        """
+        Toppings are parsed per clause (split on ',' / '.' / ' and '), not
+        against the whole sentence — a half-modifier phrase must only apply
+        to the topping it's actually next to. "large pepperoni, mushroom
+        only on one half" must not let "one half" leak onto pepperoni.
+        """
+        calls = [ToolCall("add_item", {"item": "CHEESE PIZZA", "size": size})]
+        rest = t.replace(size, "", 1)
+        bare_halves_assigned = 0  # first bare "half X" clause -> HALF_1, next -> HALF_2
+        for clause in re.split(r"[,.]| and ", rest):
+            negated, lite = _NEGATION_RE.search(clause), _LITE_RE.search(clause)
+            # Bare "cheese" normally means the base item (see
+            # _NEW_PIZZA_TOPPING_VOCAB), but "no cheese"/"light cheese" on a
+            # clause is a real exclusion/intensity request, not a base-item
+            # mention — use the full vocabulary in that case.
+            vocab = _TOPPING_VOCAB if (negated or lite) else _NEW_PIZZA_TOPPING_VOCAB
+            phrase = _find_vocab(clause, vocab)
+            if not phrase:
+                continue
+            name = oe.ALIASES.get(phrase, phrase.upper())
+            if _OTHER_HALF_RE.search(clause):
+                portion = "HALF_2"
+            elif _ONE_HALF_RE.search(clause):
+                portion = "HALF_1"
+            elif _BARE_HALF_RE.search(clause):
+                # "half pepperoni, no cheese on that half" — neither half
+                # mention says "on", so fall back to first-seen-is-HALF_1.
+                bare_halves_assigned += 1
+                portion = "HALF_1" if bare_halves_assigned == 1 else "HALF_2"
+            else:
+                portion = "WHOLE"
+            intensity = "NONE" if negated else ("LITE" if lite else "NORMAL")
+            calls += self._resolve_intensity_calls(chat, "$LAST", name, portion, intensity)
+        return Interpretation(calls=calls)
+
+    def _resolve_intensity_calls(self, chat: ChatState, line_id: str, name: str,
+                                 portion: str, intensity: str) -> list[ToolCall]:
+        """
+        T-015. `intensity` is NORMAL/NONE/LITE for one (name, portion) slot.
+        Deterministic: which existing tool operation(s) this becomes depends
+        only on real cart state, never on the grammar of what the customer
+        said — retroactive ("take X off") and preventive ("no X") phrasing
+        resolve identically once we know whether X is currently a real
+        charged topping there.
+
+        NORMAL: the plain add — unchanged from before this fix.
+
+        NONE (full exclusion) + X already a real charged topping there:
+            `remove_modifier` alone — deletes it cleanly. This is exactly
+            the pre-existing, already-tested behavior for "actually take the
+            mushrooms off" (MOD-034); T-015 does not change it.
+        NONE + X not currently there:
+            `add_modifier(intensity=NONE)` — records the $0 exclusion, the
+            exact pattern GOURMET-005's "no pineapple" already uses and is
+            verified against (kitchen sees "<no> X" on the ticket even
+            though nothing was ever going to charge for it).
+
+        LITE + X already a real charged topping there:
+            remove it first, then re-add as LITE. The customer still wants
+            the topping, just lighter — a plain `remove_modifier` would
+            drop it entirely, and `add_modifier` never merges with an
+            existing same-named topping on its own.
+        LITE + X not currently there:
+            `add_modifier(intensity=LITE)` directly — MOD-033's "light
+            onions" pattern, unchanged.
+        """
+        if intensity == "NORMAL":
+            return [ToolCall("add_modifier", {
+                "line_id": line_id, "modifier": name, "portion": portion})]
+
+        existing_full = False
+        line = chat.session.lines.get(line_id)
+        if line is not None:
+            for top in getattr(line, "toppings", []):
+                if (top.name == name and top.portion == portion
+                        and not top.removed and not top.lite):
+                    existing_full = True
+                    break
+
+        if intensity == "NONE":
+            if existing_full:
+                return [ToolCall("remove_modifier", {
+                    "line_id": line_id, "modifier": name, "portion": portion})]
+            return [ToolCall("add_modifier", {
+                "line_id": line_id, "modifier": name, "portion": portion,
+                "intensity": "NONE"})]
+
+        calls = []
+        if existing_full:
+            calls.append(ToolCall("remove_modifier", {
+                "line_id": line_id, "modifier": name, "portion": portion}))
+        calls.append(ToolCall("add_modifier", {
+            "line_id": line_id, "modifier": name, "portion": portion,
+            "intensity": "LITE"}))
+        return calls
+
+    def _resolve_clarification(self, chat: ChatState, t: str) -> Optional[Interpretation]:
+        cands = chat.pending_clarification
+        chat.pending_clarification = None
+        if cands and cands[0].get("kind") == "size_needed":
+            size = _find_vocab(t, _SIZE_VOCAB)
+            if not size:
+                chat.pending_clarification = cands
+                return None
+            return Interpretation(calls=[ToolCall("add_item", {
+                "item": "PIZZA", "size": size,
+                "gourmet_number": cands[0]["n1"],
+                "second_gourmet_number": cands[0]["n2"]})])
+        num_m = re.search(r"\bnumber\s*(\d{1,2})\b|#\s*(\d{1,2})\b", t)
+        if num_m:
+            n = int(num_m.group(1) or num_m.group(2))
+            for c in cands:
+                if c.get("kind") == "gourmet" and c.get("number") == n:
+                    return Interpretation(say=(
+                        f"Got it, #{n} {GOURMET_ROUND.get(n, '')}. What size?"))
+        for c in cands:
+            if c.get("kind") in t or (c.get("name", "").lower() in t):
+                if c["kind"] == "gourmet":
+                    return Interpretation(say="What size would you like?")
+                if c["kind"] == "topping":
+                    if chat.last_line_id:
+                        return Interpretation(calls=[ToolCall("add_modifier", {
+                            "line_id": chat.last_line_id, "modifier": c["name"]})])
+                    return Interpretation(say="Which pizza should that go on?")
+                if c["kind"] == "item":
+                    return Interpretation(calls=[ToolCall("add_item", {"item": c["name"]})])
+        return None
+
+
+# ===========================================================================
+# LLMInterpreter — real model-backed interpreter (T-013).
+#
+# The tool schema below is INTROSPECTED from the real orders.TOOLS functions
+# (via inspect.signature), never hand-duplicated — the model can never be
+# offered a parameter that doesn't exist on the real tool. `confirm_order`'s
+# `quote_id`/`idempotency_key` are explicitly excluded from the schema the
+# model sees and are injected here from `chat.session.quote_id` — the model
+# can request confirmation, it can never supply the ID that authorizes it
+# (see F5 in orders.py; a model-fabricated ID would be rejected by the real
+# STALE_QUOTE check regardless, but it's excluded from the schema entirely
+# so there is nothing to fabricate).
+# ===========================================================================
+
+_MODEL_HIDDEN_ARGS = {
+    "confirm_order": {"quote_id", "idempotency_key"},
+}
+
+_TOOL_DESCRIPTIONS = {
+    "get_store_info": "Look up store hours, delivery minimum/radius, phone, address. Never invent this info.",
+    "search_menu": "Search the menu by free-text query. Use this instead of guessing whether an item/topping exists, or whenever a request could match more than one thing.",
+    "decline_item": "Explicitly drop a request that is still awaiting clarification (e.g. the customer says \"forget the wings\" after being asked which size). Clears it so the system stops asking. Does not touch the cart.",
+    "check_availability": "Check whether a specific menu item is currently available (not 86'd).",
+    "set_order_type": "Set pickup or delivery. Delivery requires an address.",
+    "add_item": ("Add a pizza (item='PIZZA' or 'CHEESE PIZZA', with size) or a non-pizza item "
+                "(item = the exact menu item name). For a HALF_AND_HALF specialty pizza (two "
+                "different named specialties split down the middle), pass BOTH gourmet_number "
+                "and second_gourmet_number. In a LATER call in this SAME turn, you may use the "
+                "literal string \"$LAST\" as line_id to refer to the pizza this call just created."),
+    "add_modifier": ("Add a topping to an existing pizza line. portion is WHOLE, HALF_1, or "
+                     "HALF_2. intensity is NORMAL, DOUBLE, TRIPLE, LITE, or NONE (NONE removes "
+                     "it / means \"no X\")."),
+    "remove_modifier": "Remove a topping from a pizza line.",
+    "update_item": "Change an existing line's quantity or size.",
+    "remove_item": "Remove an entire line from the cart.",
+    "apply_coupon": "Apply a coupon by its exact code. Omit code to let the engine pick the best eligible offer.",
+    "remove_coupon": "Remove any applied coupon.",
+    "request_quote": "Get the current total. Call this when the customer asks for a total or says they're done adding items.",
+    "begin_confirmation": ("Start the confirmation window, ONLY after the customer gives "
+                          "EXPLICIT affirmative confirmation (\"yes, place it\", \"go ahead\", "
+                          "\"confirm\"). A vague reply like \"that's it\" or \"sure, I guess\" is "
+                          "NOT confirmation. This returns a readback — say it to the customer. "
+                          "confirm_order cannot be called in this same turn; it fires only once "
+                          "the customer responds again, in their next turn, after hearing it."),
+    "confirm_order": ("Finalize the order. The system supplies quote_id automatically. Only "
+                      "valid in a turn AFTER begin_confirmation's readback was already spoken "
+                      "and the customer just gave another explicit affirmative in response to it."),
+    "cancel_order": "Cancel the order.",
+    "transfer_to_human": "Transfer the call to a human staff member.",
+}
+
+_SYSTEM_PROMPT = """You are the order-taking assistant for Lakewood Pizza. You interpret what a customer says and call the provided tools to build their order. You never compute prices or totals yourself — the tools do that, and you must never state a price or total that didn't come from a tool result.
+
+Rules:
+- Use only the provided tools. Never invent a menu item, topping, or price.
+- If a request is ambiguous, or you are not sure an item/topping exists, call search_menu — never guess.
+- Preserve whole/half modifier scope exactly as the customer stated it.
+- A correction ("actually, replace X with Y") should modify the existing order, not start a new item, unless the customer is clearly starting over.
+- Never call begin_confirmation or confirm_order without EXPLICIT affirmative confirmation from the customer this turn.
+- Any cart change after a quote needs a fresh request_quote before confirming again.
+- Never tell the customer their order is placed unless confirm_order actually succeeded.
+- If nothing needs a tool call, reply in one short, friendly, restaurant-counter sentence. No price claims, no over-explaining.
+"""
+
+
+def _base_json_type(annotation: str) -> dict:
+    ann = annotation.replace(" ", "")
+    parts = [p for p in ann.split("|") if p != "None"]
+    base = parts[0] if parts else "str"
+    if base.startswith("list[") and base.endswith("]"):
+        return {"type": "array", "items": _base_json_type(base[5:-1])}
+    return {"type": {"str": "string", "int": "integer", "bool": "boolean",
+                      "float": "number"}.get(base, "string")}
+
+
+def _build_tool_schemas() -> list[dict]:
+    schemas = []
+    for name, fn in TOOLS.items():
+        hidden = _MODEL_HIDDEN_ARGS.get(name, set())
+        props, required = {}, []
+        for pname, p in inspect.signature(fn).parameters.items():
+            if pname == "sess" or pname in hidden:
+                continue
+            ann = p.annotation if isinstance(p.annotation, str) else "str"
+            props[pname] = _base_json_type(ann)
+            if p.default is inspect.Parameter.empty:
+                required.append(pname)
+        schemas.append({
+            "name": name,
+            "description": _TOOL_DESCRIPTIONS.get(name, name),
+            "input_schema": {"type": "object", "properties": props, "required": required},
+        })
+    return schemas
+
+
+_TOOL_SCHEMAS = _build_tool_schemas()
+
+
+def _state_context(session: oe.Session) -> str:
+    """Only what the model needs to resolve pronouns/corrections against —
+    line_ids and their current toppings, order type, state. Never a price;
+    never the whole codebase or session internals."""
+    lines = []
+    for lid, line in session.lines.items():
+        if hasattr(line, "toppings"):
+            tops = ", ".join(f"{t.name}({t.portion})" for t in line.toppings) or "no toppings"
+            extra = f" #{line.gourmet}" if line.gourmet else (
+                f" HALF_AND_HALF #{line.half_and_half[0]}/#{line.half_and_half[1]}"
+                if line.half_and_half else "")
+            lines.append(f"  {lid}: {line.size}{extra} pizza — {tops}")
+        else:
+            lines.append(f"  {lid}: {line.quantity}x {line.name}")
+    cart = "\n".join(lines) if lines else "  (empty)"
+    parts = [f"Order type: {session.order.order_type}",
+             f"State: {session.state}", f"Cart:\n{cart}"]
+    if session.state == "QUOTED":
+        parts.append("A quote is active. If the customer confirms now, call "
+                     "begin_confirmation ONLY — it returns a readback to speak. "
+                     "confirm_order must wait for the customer's next explicit "
+                     "yes, in a later turn, after they hear that readback.")
+    if session.state == "AWAITING_CONFIRMATION":
+        parts.append("The readback was already spoken. If the customer just gave "
+                     "another explicit affirmative in response to it, call "
+                     "confirm_order now.")
+    return "\n".join(parts)
+
+
+class LLMInterpreter:
+    """Execute the shared tool contract against a staged in-memory session.
+
+    Providers may request continuation after tool results. Only a successful
+    bounded turn commits its staged session; network/response failures discard
+    the whole turn, including history and quote/confirmation bookkeeping.
+    Anthropic retains its existing single-round behavior.
+    """
+
+    def __init__(self, provider: LLMProvider | None = None):
+        self.provider = provider if provider is not None else make_provider()
+        self.last_provider_error = None
+        self.responses = []
+
+    def interpret(self, chat: ChatState, text: str) -> Interpretation:
+        self.last_provider_error = None
+        self.responses = []
+        staged = copy.deepcopy(chat)
+        staged.llm_history.append({"role": "user", "content": text})
+        try:
+            result = self._interpret_staged(staged)
+        except ProviderCallError as e:
+            self.last_provider_error = str(e)
+            return Interpretation(
+                say=f"Sorry, I'm having trouble right now — could you repeat that? ({e})")
+        # Keep the authoritative Session identity used by chat/eval callers.
+        chat.session.__dict__.update(staged.session.__dict__)
+        chat.last_line_id = staged.last_line_id
+        chat.pending_clarification = staged.pending_clarification
+        chat.llm_history = staged.llm_history
+        return result
+
+    def _interpret_staged(self, chat: ChatState) -> Interpretation:
+        executed = []
+        last_new_line_id = None
+        for _ in range(12):
+            system = _SYSTEM_PROMPT + "\n\nCurrent order state:\n" + _state_context(chat.session)
+            resp = self.provider.complete(system, chat.llm_history, _TOOL_SCHEMAS)
+            self.responses.append(resp)
+            chat.llm_history.append({"role": "assistant", "content": resp.raw_content})
+            if not resp.tool_uses:
+                return Interpretation(already_executed=executed,
+                                      say=resp.text or "Sorry, could you say that again?")
+
+            tool_result_blocks = []
+            for tu in resp.tool_uses:
+                call = ToolCall(tu["name"], tu.get("input", {}))
+                name, args = call.tool, call.args
+                fn = TOOLS.get(name)
+                schema = next((t["input_schema"] for t in _TOOL_SCHEMAS
+                               if t["name"] == name), None)
+                if fn is None:
+                    r = {"status": "error", "code": "UNKNOWN_TOOL",
+                         "message": f"{name!r} is not a real tool."}
+                elif not _valid_tool_args(args, schema, _MODEL_HIDDEN_ARGS.get(name, set())):
+                    r = {"status": "error", "code": "BAD_ARGS",
+                         "message": "Tool arguments do not match the permitted schema."}
+                else:
+                    args = {k: v for k, v in args.items()
+                            if k not in _MODEL_HIDDEN_ARGS.get(name, set())}
+                    if name == "confirm_order":
+                        args["quote_id"] = chat.session.quote_id
+                    args = substitute_last_line(args, last_new_line_id)
+                    try:
+                        r = (chat.tool_executor(name, args, fn, chat.session)
+                             if chat.tool_executor is not None else fn(chat.session, **args))
+                    except (TypeError, ValueError) as e:
+                        r = {"status": "error", "code": "BAD_ARGS", "message": str(e)}
+
+                executed.append({"tool": name, "args": args, "result": r})
+                if name == "add_item" and r.get("status") == "ok":
+                    last_new_line_id = r["line_id"]
+                    chat.last_line_id = last_new_line_id
+                if name == "search_menu" and r.get("status") == "ok":
+                    chat.pending_clarification = r.get("results", [])
+                tool_result_blocks.append({
+                    "type": "tool_result", "tool_use_id": tu["id"],
+                    "content": json.dumps(r, default=str),
+                })
+            chat.llm_history.append({"role": "user", "content": tool_result_blocks})
+            if not resp.continue_turn:
+                return Interpretation(already_executed=executed, say=resp.text)
+        raise ProviderCallError("Provider tool loop exceeded 12 rounds; turn discarded")
+
+
+def _valid_tool_args(args, schema, hidden) -> bool:
+    """Validate primitive JSON types before domain code can mutate anything.
+
+    Hidden confirmation values are ignored and injected by the server. Domain
+    functions remain the authority on valid menu names, quantities and states.
+    """
+    if not isinstance(args, dict):
+        return False
+    props = schema["properties"]
+    if set(args) - set(props) - hidden or not set(schema["required"]) <= set(args):
+        return False
+
+    def matches(value, spec):
+        kind = spec["type"]
+        if kind == "array":
+            return isinstance(value, list) and all(matches(v, spec["items"]) for v in value)
+        types = {"string": (str,), "integer": (int,), "boolean": (bool,),
+                 "number": (int, float)}
+        return type(value) in types[kind]
+
+    return all(matches(v, props[k]) for k, v in args.items() if k in props)

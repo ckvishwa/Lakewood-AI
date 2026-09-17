@@ -1,0 +1,82 @@
+# More transfer-trigger variety, plus confirmation edges beyond CONFIRM-001:
+# cart-changed quote invalidation (F4), the QUOTED -> AWAITING_CONFIRMATION
+# step itself, and delivery refusal paths (minimum, missing address).
+- id: TRANSFER-003
+  tags: [transfer, refund]
+  setup: {order_type: pickup}
+  turns:
+    - user: "I want a refund, my last order from here was wrong"
+      calls:
+        - {tool: transfer_to_human, args: {reason: refund_or_complaint}}
+      forbid: [add_item, confirm_order]
+  assert_final: {state: TRANSFERRED}
+
+- id: TRANSFER-004
+  tags: [transfer, unsupported]
+  setup: {order_type: pickup}
+  turns:
+    - user: "can you cater my wedding for two hundred people"
+      calls:
+        - {tool: transfer_to_human, args: {reason: unsupported_request}}
+      forbid: [add_item, confirm_order]
+  assert_final: {state: TRANSFERRED}
+
+- id: CONFIRM-002
+  tags: [confirmation, cart_changed]
+  # F4: any cart mutation after a quote drops the order back to BUILDING and
+  # kills the quote — a customer can never be charged for a cart they did not
+  # hear read back.
+  setup: {order_type: pickup}
+  turns:
+    - user: "large cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+    - user: "what's the total"
+      calls:
+        - {tool: request_quote, args: {}}
+    - user: "actually add pepperoni too"
+      calls:
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+      forbid: [confirm_order]
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: CONFIRM-003
+  tags: [confirmation, edge]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+    - user: "what's the total"
+      calls:
+        - {tool: request_quote, args: {}}
+    - user: "yes that's right, go ahead"
+      calls:
+        - {tool: begin_confirmation, args: {}}
+      forbid: [confirm_order]
+  assert_final: {subtotal: "13.00", state: AWAITING_CONFIRMATION}
+
+- id: DELIVERY-002
+  tags: [delivery, refusal]
+  setup: {}
+  turns:
+    - user: "deliver to 1 Elm St"
+      calls:
+        - {tool: set_order_type, args: {order_type: delivery, address: "1 Elm St"}}
+    - user: "just a small cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+    - user: "what's my total"
+      calls:
+        - {tool: request_quote, args: {}, expect_error: BELOW_DELIVERY_MINIMUM}
+  assert_final: {subtotal: "11.00", state: BUILDING}
+
+- id: DELIVERY-003
+  tags: [delivery, refusal]
+  setup: {}
+  turns:
+    - user: "actually can you deliver"
+      calls:
+        - {tool: set_order_type, args: {order_type: delivery}, expect_error: ADDRESS_REQUIRED}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: DRAFT}

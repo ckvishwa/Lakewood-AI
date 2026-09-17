@@ -1,0 +1,158 @@
+# Modifier scope (whole vs half), intensity, specialty-pizza customization,
+# and slang/short-form requests. Subtotals reuse the same verified per-topping
+# tier rates as tests/test_pricing_parity.py — no new pricing rule exercised.
+- id: MOD-030
+  tags: [modifier, half, portion]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large pizza with pepperoni on the whole thing and mushroom just on one half"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: WHOLE}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom, portion: HALF_2}}
+  assert_final: {subtotal: "21.00", state: BUILDING}
+
+- id: MOD-031
+  tags: [modifier, half, portion]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large half sausage and ham, half bacon and olives"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: ham, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: bacon, portion: HALF_2}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: olives, portion: HALF_2}}
+  assert_final: {subtotal: "27.00", state: BUILDING}
+
+- id: MOD-032
+  tags: [modifier, intensity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese with triple pepperoni"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, intensity: TRIPLE}}
+  assert_final: {subtotal: "17.00", state: BUILDING}
+
+- id: MOD-033
+  tags: [modifier, intensity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium cheese, light onions"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: onion, intensity: LITE}}
+  assert_final: {subtotal: "13.00", state: BUILDING}
+
+- id: MOD-034
+  tags: [modifier, removal, correction]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large pizza with mushrooms"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom}}
+    - user: "actually take the mushrooms off"
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: mushroom}}
+  assert_final: {subtotal: "15.00", state: BUILDING}
+
+- id: GOURMET-013
+  tags: [specialty, half_and_half_sku]
+  # T-008: the HALF_AND_HALF SKU (lakewood/pricing.py PizzaLine.half_and_half)
+  # — two named specialties, larger-half-only/flat gourmet price, owner-
+  # confirmed specialty/specialty only — is now reachable via
+  # add_item(second_gourmet_number=...). Distinct from the `half_additive`
+  # path every other half-and-half case in this corpus uses (MOD-014,
+  # MOD-030, MOD-031, CORRECT-005, GOURMET-010): those build a half split out
+  # of per-topping HALF_1/HALF_2 modifiers on one gourmet/cheese base, priced
+  # additively; this one names two whole specialties directly and is priced
+  # flat, per size, regardless of which two. Value reused verbatim from the
+  # already-verified 'SM half&half' case in tests/test_pricing_parity.py.
+  setup: {order_type: pickup}
+  turns:
+    - user: "small pizza, half number ten Hawaiian, half number eight BBQ chicken"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: small, gourmet_number: 10, second_gourmet_number: 8}}
+  assert_final: {subtotal: "16.00", state: BUILDING}
+
+- id: MOD-035
+  tags: [modifier, flat]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese with a side of ranch"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: ranch}}
+  assert_final: {subtotal: "11.25", state: BUILDING}
+
+- id: GOURMET-010
+  tags: [specialty, modifier, half]
+  setup: {order_type: pickup}
+  turns:
+    - user: "medium number ten, extra pepperoni just on one half"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: medium, gourmet_number: 10}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+  assert_final: {subtotal: "21.50", state: BUILDING}
+
+- id: GOURMET-011
+  tags: [specialty, sicilian]
+  # Confirms the standard gourmet list is used on Sicilian, not the stale
+  # POS-screen overrides (docs/OPEN-QUESTIONS.md; GOURMET_SICILIAN_OVERRIDES
+  # is intentionally empty).
+  setup: {order_type: pickup}
+  turns:
+    - user: "sicilian number three"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: sicilian, gourmet_number: 3}}
+  assert_final: {subtotal: "24.00", state: BUILDING}
+
+- id: GOURMET-012
+  tags: [specialty, modifier]
+  setup: {order_type: pickup}
+  turns:
+    - user: "large number eleven with chicken"
+      calls:
+        - {tool: add_item, args: {item: PIZZA, size: large, gourmet_number: 11}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: chicken}}
+  assert_final: {subtotal: "26.50", state: BUILDING}
+
+- id: SLANG-001
+  tags: [slang, modifier]
+  setup: {order_type: pickup}
+  turns:
+    - user: "gimme a lg pep"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: lg}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+  assert_final: {subtotal: "18.00", state: BUILDING}
+
+- id: SLANG-002
+  tags: [slang, happy]
+  setup: {order_type: pickup}
+  turns:
+    - user: "just a plain pie, medium"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium}}
+  assert_final: {subtotal: "13.00", state: BUILDING}
+
+- id: SLANG-003
+  tags: [slang, quantity]
+  setup: {order_type: pickup}
+  turns:
+    - user: "two mediums, plain"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium, quantity: 2}}
+  assert_final: {subtotal: "26.00", state: BUILDING}
+
+- id: MOD-036
+  tags: [modifier, slang]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small pizza, extra cheese"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: "extra cheese"}}
+  assert_final: {subtotal: "13.00", state: BUILDING}

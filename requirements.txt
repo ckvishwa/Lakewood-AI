@@ -1,0 +1,18 @@
+# Runtime has no third-party dependencies by design — the pricing and order
+# engines are pure stdlib so they cannot break on a transitive upgrade.
+pyyaml>=6.0        # eval case loading
+pytest>=8.0        # tests
+
+# Optional — only needed if LAKEWOOD_STT_PROVIDER=faster_whisper is actually
+# selected (lazy-imported; lakewood/stt/fake.py needs nothing installed).
+# Not part of the lakewood/ runtime stdlib-only policy above.
+faster-whisper>=1.0   # local STT (ADR-008); anthropic/openai LLM providers use stdlib urllib, no SDK needed
+
+# Optional — only needed to actually construct PostgresSessionRepository
+# (lazy-imported inside lakewood/persistence/postgres_repository.py and
+# migrations/runner.py; InMemorySessionRepository, used by the full test
+# suite and the T-016 offline gate, needs nothing installed). ADR-014.
+psycopg2-binary>=2.9   # Postgres driver for real persistence
+
+# Optional — local push-to-talk capture only; lazy-imported by lakewood.voice.
+sounddevice>=0.4       # microphone adapter; no audio hardware required by tests

@@ -1,0 +1,41 @@
+# Store info/FAQ, and coupon happy-path + refusal. Coupon totals here match
+# the currently-coded (tax-on-discounted-subtotal) assumption — see
+# docs/STATUS.md "Pricing parity milestone": the coupon category is verified
+# label-consistency, not a verified-at-the-register business rule.
+- id: FAQ-001
+  tags: [store_info, faq]
+  setup: {}
+  turns:
+    - user: "what are your hours, and do you deliver"
+      calls:
+        - {tool: get_store_info, args: {}}
+  assert_final: {subtotal: "0.00", state: DRAFT}
+
+- id: COUPON-001
+  tags: [coupon, happy]
+  # T-024: "wings" names no count and this menu has two real SKUs — genuinely
+  # ambiguous. Coupon application is deferred to the follow-up turn (after
+  # wings resolve) since the discount's own eligibility depends on the real
+  # final subtotal, not a partial one. Same final total as before — not a
+  # relabeling, only correctly sequenced.
+  setup: {order_type: pickup}
+  turns:
+    - user: "party size cheese and wings, and I have the three dollars off thirty coupon"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: party}}
+    - user: "the six piece wings, and go ahead with the coupon"
+      calls:
+        - {tool: add_item, args: {item: "6PC WINGS"}}
+        - {tool: apply_coupon, args: {code: OFF_3_AT_30}}
+  assert_final: {subtotal: "34.00", total: "33.28", state: BUILDING}
+
+- id: COUPON-002
+  tags: [coupon, refusal]
+  setup: {order_type: pickup}
+  turns:
+    - user: "small cheese, and can I get three dollars off thirty"
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: apply_coupon, args: {code: OFF_3_AT_30}, expect_error: COUPON_NOT_APPLICABLE}
+      forbid: [confirm_order]
+  assert_final: {subtotal: "11.00", state: BUILDING}

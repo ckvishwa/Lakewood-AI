@@ -1,0 +1,79 @@
+# Full transactional confirmation flow, made possible by the runtime `$ref`
+# binding mechanism in evals/runner.py (resolve_args). Every prior
+# confirmation case in this corpus (CONFIRM-001/002/003) tested refusal/edge
+# behavior only, because request_quote()'s quote_id is a runtime UUID that
+# cannot be hard-coded into a YAML label. These two cases exercise the real
+# BUILDING -> QUOTED -> AWAITING_CONFIRMATION -> CONFIRMED path and the real
+# stale-quote refusal path, with the actual runtime quote_id flowing through
+# — no UUID is hard-coded anywhere in this file.
+#
+# Syntax: `{"$ref": "step.field"}` in a call's `args` resolves to the value
+# at `field` in the structured result of an earlier call in the same case,
+# named by its `as:` label (or its tool name, if unlabeled). See
+# docs/EVALS.md "Runtime value binding" for the full contract.
+- id: CONFIRM-004
+  tags: [confirmation, happy, correction, half]
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large pizza, half pepperoni half mushroom."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, portion: HALF_1}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: mushroom, portion: HALF_2}}
+    - user: "Actually replace the mushroom with sausage."
+      calls:
+        - {tool: remove_modifier, args: {line_id: L1, modifier: mushroom, portion: HALF_2}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: sausage, portion: HALF_2}}
+    - user: "What's my total?"
+      calls:
+        - {tool: request_quote, as: quote, args: {}}
+    - user: "Yes, place it."
+      calls:
+        - {tool: begin_confirmation, args: {}}
+      forbid: [confirm_order]
+    - user: "Go ahead, place it."
+      # T-019/F14: confirm_order must land in a SEPARATE turn from
+      # begin_confirmation — the customer has to hear the readback and
+      # respond again. This case originally bundled both into "Yes, place
+      # it." itself; that shape is what let a wrong/incomplete cart get
+      # silently confirmed in the exact live failure this task fixes (see
+      # docs/STATUS.md "T-018 milestone" / docs/NEXT_TASKS.md T-019). Split
+      # here so the happy path still reaches CONFIRMED, just over two turns.
+      calls:
+        - tool: confirm_order
+          args:
+            quote_id: {$ref: "quote.quote_id"}
+            idempotency_key: "eval-CONFIRM-004"
+  assert_final: {subtotal: "21.00", total: "22.54", state: CONFIRMED}
+
+- id: CONFIRM-005
+  tags: [confirmation, stale_quote, half]
+  # Regression: a $ref captures a REAL runtime quote_id, the cart is mutated
+  # (invalidating it) and re-quoted (issuing a genuinely different one), and
+  # the stale captured value is then presented to confirm_order. This proves
+  # F5's quote_id/cart_hash check is what's firing — not just the state
+  # guard — so the harness is exercising real quote semantics, not just
+  # moving a string around.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Large cheese pizza."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: large}}
+    - user: "What's my total?"
+      calls:
+        - {tool: request_quote, as: first_quote, args: {}}
+    - user: "Actually add pepperoni too."
+      calls:
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni}}
+      forbid: [confirm_order]
+    - user: "Ok what's the new total?"
+      calls:
+        - {tool: request_quote, as: second_quote, args: {}}
+    - user: "Yes, confirm it."
+      calls:
+        - {tool: begin_confirmation, args: {}}
+        - tool: confirm_order
+          args:
+            quote_id: {$ref: "first_quote.quote_id"}
+          expect_error: STALE_QUOTE
+  assert_final: {subtotal: "18.00", state: AWAITING_CONFIRMATION}
