@@ -542,9 +542,14 @@ this task's own instruction to try cheap first:**
    ALIASES`** table (same shape, same file) covers non-pizza spoken forms
    that were never a substring of the real POS name at all — drink words
    ("coke"/"soda"/"two liter"/"bottle" → `CAN`/`2LITER`/`20OZ`, mirroring
-   `RuleBasedInterpreter`'s own private `_DRINK_WORDS` so both interpreters
-   share the same real vocabulary) and one abbreviation
+   `RuleBasedInterpreter`'s own private `_DRINK_WORDS` — corrected below,
+   T-039: this was never actually true, they drifted apart) and one abbreviation
    ("strawberry cheesecake" → `STRWBRY CHZCAKE`).
+   **T-039 correction:** the two tables kept drifting — `_DRINK_WORDS`
+   missed T-032's later precedence fix and grew its own worse bug (a bare
+   "can" as a false trigger, see ADR-017). `RuleBasedInterpreter._find_drink`
+   now calls `oe.non_pizza_alias_hits` directly instead of maintaining a
+   second copy — one real table, one real precedence rule, two callers.
 4. **A `CHEESE PIZZA` pseudo-hit** — the actual fix for the largest class.
    Fires when "pizza" appears in the query AND either nothing else
    unrecognized is left over ("cheese pizza", "large cheese pizza", "party
@@ -587,6 +592,32 @@ rather than risk a wrong match.
 the reverted reverse-match attempt and are back to green with the final
 version) and the full suite are unaffected — see `docs/STATUS.md` "T-020
 milestone" for the live-provider delta.
+
+## Real speech found a P0 the corpus never did — T-039
+
+Ten turns of a real T-038 Phase 2 voice session (real spoken audio, real
+Parakeet STT, transcripts independently confirmed correct) found a P0 —
+`RuleBasedInterpreter` silently turning a garden salad into a small cheese
+pizza, a calzone and a chicken caesar wrap into topping words grafted onto
+that same wrong line, and "a two liter coke" into a can — that **73 hand-
+authored cases, every synthetic fixture, and four prior diagnostic sweeps
+(T-020, T-022, T-027, T-031) never surfaced.** Full mechanism, fix, and
+evidence: `docs/decisions/ADR-017-no-silent-item-substitution.md`.
+
+**Root cause of the corpus blind spot, checked directly, not assumed:** zero
+of the 73 pre-existing cases ordered a non-pizza item (salad, calzone, wrap,
+appetizer) at all — the exact class of order this defect hit. A corpus built
+entirely from hand-authored pizza-centric phrasing cannot find a bug whose
+trigger condition it never once constructs. `evals/cases/non_pizza_items.yaml`
+(5 cases, added this task) closes the gap going forward, but the honest
+lesson is narrower than "add more cases": **synthetic corpus growth is bounded
+by what the corpus author thinks to write.** Real calls are not. This is the
+standing argument for prioritizing (a) real-audio STT fixtures over more
+synthesized-SAPI ones (see `docs/decisions/ADR-008-local-stt-runtime.md`'s
+own caveat), and (b) reaching a real restaurant pilot, where every
+transferred/corrected call becomes a case no one had to imagine in advance —
+exactly the corpus-flywheel step below, now with a concrete example of what
+it catches that hand-authoring structurally cannot.
 
 ## Release gate
 

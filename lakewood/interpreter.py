@@ -106,17 +106,28 @@ _SIZE_VOCAB = sorted(
 # mention) — see _new_pizza's clause loop.
 _NEW_PIZZA_TOPPING_VOCAB = [p for p in _TOPPING_VOCAB if p != "cheese"]
 
-# Common branded/generic drink words -> a REAL, verified NON_PIZZA key. Not a
-# menu fabrication: "coke"/"soda" aren't SKUs on this menu, but "CAN" is, and
-# defaulting a bare drink mention to the smallest real size is the one
-# deliberate guess this interpreter makes — a low-stakes, trivially
-# correctable default, unlike guessing a pizza topping or price ever would
-# be. See docs/STATUS.md Known problems for the honest caveat.
-_DRINK_WORDS = {
-    "coke": "CAN", "pepsi": "CAN", "soda": "CAN", "pop": "CAN", "can": "CAN",
-    "two liter": "2LITER", "2 liter": "2LITER", "2-liter": "2LITER",
-    "bottle": "20OZ", "20 oz": "20OZ", "20oz": "20OZ",
-}
+# T-039: a bare "can" used to be its own trigger here (the ordinary modal
+# verb in "can I get...", not a drink mention) and this dict was a second,
+# independently-maintained copy of orders.py's NON_PIZZA_ALIASES that never
+# got T-032's "two liter" > "coke" precedence fix, so "a two liter coke"
+# silently resolved to a can. Both bugs are closed the same way: drink
+# resolution now goes through oe.non_pizza_alias_hits — the one real alias
+# table and precedence rule search_menu itself uses — so this fast path can
+# never again drift out of sync with it.
+# Real, non-pizza menu-item nouns that must never be swallowed by a
+# co-occurring size/topping word into a fabricated pizza (T-039). "small" is
+# also a real GARDEN SALAD SM/SALAD SM size; CHICKEN/MOZZARELLA are real
+# ingredients on a calzone/wrap/salad too — none of that makes the utterance
+# a pizza order. Each word traces to a real oe.NON_PIZZA key; deliberately
+# excludes shared ingredient words (chicken, bacon, mozzarella) and generic
+# modifiers ("extra", "double") that legitimately appear on a real pizza
+# request too — this is a veto on ASSUMING pizza, not an attempt to resolve
+# the item itself (search_menu still does that, for real, in the fallback
+# this triggers).
+_NON_PIZZA_HEAD_WORDS = [
+    "salad", "calzone", "wrap", "grinder", "stromboli", "cheesecake",
+    "tiramisu", "hamburger", "cheeseburger", "burger", "dinner", "roll",
+]
 
 _CONFIRM_RE = re.compile(
     r"\b(yes|yeah|yep|sure).{0,20}\b(place|confirm|go ahead)\b"
@@ -172,10 +183,17 @@ def _find_vocab(text: str, vocab: list[str]) -> Optional[str]:
 
 
 def _find_drink(text: str) -> Optional[str]:
-    for word, key in _DRINK_WORDS.items():
-        if re.search(rf"\b{re.escape(word)}\b", text):
-            return key
-    return None
+    hits = oe.non_pizza_alias_hits(text)
+    return hits[0][1] if hits else None
+
+
+def _clean_query(t: str) -> str:
+    """Strip conversational filler before handing text to search_menu — the
+    real menu lookup, never a guess. Shared by the plain fallback and the
+    non-pizza head-word veto below so there is one query-cleaning rule, not
+    two copies that could drift apart."""
+    query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
+    return re.sub(r"\s+", " ", query).strip() or t
 
 
 class RuleBasedInterpreter:
@@ -236,6 +254,20 @@ class RuleBasedInterpreter:
         if m and size:
             return self._new_pizza_half_a_half_b(chat, size, m.group("a"), m.group("b"))
 
+        # 6.5. An utterance naming a real non-pizza item (T-039) overrides
+        # ANY co-occurring size/drink/topping word — "garden salad small"
+        # must never become a pizza just because "small" is also a pizza
+        # size, and "one calzone with mozzarella" must never graft
+        # "mozzarella" onto whatever pizza line already happens to be open.
+        # This check runs before, and therefore short-circuits, drink
+        # detection (7), new-pizza creation (8), and the bare-topping graft
+        # onto chat.last_line_id (9) — the three places T-039 found this
+        # exact defect, all from one missing check, not three separate ones.
+        # Route to a real menu lookup instead of guessing.
+        if _find_vocab(t, _NON_PIZZA_HEAD_WORDS):
+            return Interpretation(calls=[
+                ToolCall("search_menu", {"query": _clean_query(t)})])
+
         # 7. Generic drink mention.
         drink_key = _find_drink(t)
         if drink_key and not size:
@@ -264,10 +296,8 @@ class RuleBasedInterpreter:
                 chat, chat.last_line_id, topping, portion, intensity))
 
         # 10. Fall through to a real menu lookup — never guess an item.
-        query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
-        query = re.sub(r"\s+", " ", query).strip() or t
-        return Interpretation(calls=[ToolCall("search_menu", {"query": query})],
-                              say=None)
+        return Interpretation(calls=[
+            ToolCall("search_menu", {"query": _clean_query(t)})], say=None)
 
     # -- helpers --------------------------------------------------------
 

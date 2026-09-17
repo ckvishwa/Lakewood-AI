@@ -143,7 +143,31 @@ NON_PIZZA_ALIASES = {
 # "can of soda" is deliberately excluded: it names the container, not a
 # generic catch-all, so it never competes with a size alias the way the
 # bare words below do.
-_GENERIC_DRINK_ALIASES = {"coke", "pepsi", "soda", "pop"}
+#
+# Public (not `_`-prefixed): interpreter.py's RuleBasedInterpreter._find_drink
+# resolves the SAME precedence via non_pizza_alias_hits() below — T-039 found
+# it had its own second, never-updated copy of this exact alias table, which
+# silently reintroduced the "two liter coke" -> CAN collision T-032 fixed
+# here alone, plus its own worse bug (a bare "can", i.e. the modal verb in
+# "can I get...", as a false drink signal). One table, one precedence rule,
+# two callers — that bug class cannot recur by construction.
+GENERIC_DRINK_ALIASES = {"coke", "pepsi", "soda", "pop"}
+
+
+def non_pizza_alias_hits(raw_q: str) -> list[tuple[str, str]]:
+    """NON_PIZZA_ALIASES matches in `raw_q` that survive the generic-vs-
+    specific precedence rule (T-032): a specific drink size ("two liter")
+    always wins over a co-occurring generic catch-all ("soda"/"coke"/"pepsi"/
+    "pop") in the SAME query. Returns `(alias, canonical_name)` pairs in
+    `NON_PIZZA_ALIASES` order; a caller wanting a single best answer takes
+    the first entry, a caller wanting every real candidate (search_menu) uses
+    them all.
+    """
+    matched = [(a, c) for a, c in NON_PIZZA_ALIASES.items()
+               if re.search(rf"\b{re.escape(a)}\b", raw_q)]
+    specific = {c for a, c in matched if a not in GENERIC_DRINK_ALIASES}
+    return [(a, c) for a, c in matched
+            if not (a in GENERIC_DRINK_ALIASES and specific and c not in specific)]
 
 # T-020: words that carry no menu-identifying content but routinely appear
 # around a real item/topping name in a natural request and previously broke
@@ -562,14 +586,7 @@ def search_menu(sess: Session, query: str, category: str | None = None):
     # the cheese/pizza fix above: a more specific thing the customer
     # actually named outranks a generic word that happens to trail it.
     # "soda"/"coke"/"pepsi"/"pop" alone (no specific size) are unaffected.
-    _matched_np_aliases = [(a, c) for a, c in NON_PIZZA_ALIASES.items()
-                           if re.search(rf"\b{re.escape(a)}\b", raw_q)]
-    _specific_drink_sizes = {c for a, c in _matched_np_aliases
-                             if a not in _GENERIC_DRINK_ALIASES}
-    for alias, canon in _matched_np_aliases:
-        if alias in _GENERIC_DRINK_ALIASES and _specific_drink_sizes \
-                and canon not in _specific_drink_sizes:
-            continue
+    for alias, canon in non_pizza_alias_hits(raw_q):
         if canon not in item_names:
             hits.append({"kind": "item", "name": canon})
             item_names.add(canon)

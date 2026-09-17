@@ -22,17 +22,36 @@ CASES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 36/71 on 2026-09-15 (T-019) — CONFIRM-003 now passes because F14's
 # same-turn confirmation gate stops RuleBasedInterpreter's own QUOTED-state
 # shortcut from reaching CONFIRMED where the label expects
-# AWAITING_CONFIRMATION. Real, observed, reproducible; not a target — this
-# is the honest floor of what RuleBasedInterpreter, a deliberately narrow,
-# non-NLU pattern matcher, actually gets right today. CLAUDE.md's 98-99%
-# target is a PRODUCTION MODEL number and has nothing to do with this value.
+# AWAITING_CONFIRMATION. Raised to 36/73 on 2026-09-16 (T-024/T-032 corpus
+# growth, absolute count unchanged). Raised to 37/73 on 2026-09-17 (T-039) —
+# DELIVERY-003 ("actually can you deliver") now passes: a bare "can" used to
+# be its own drink-word trigger in interpreter.py's own copy of the drink
+# alias table, so this utterance silently added a CAN to the cart before the
+# label's `forbid: [add_item]`/`subtotal: 0.00` assertion ever got a chance.
+# T-039 replaced that copy with orders.py's real, precedence-correct
+# NON_PIZZA_ALIASES table (see docs/decisions/ADR-017), which never treated
+# bare "can" as a drink signal to begin with. Real, observed, reproducible;
+# not a target — this is the honest floor of what RuleBasedInterpreter, a
+# deliberately narrow, non-NLU pattern matcher, actually gets right today.
+# CLAUDE.md's 98-99% target is a PRODUCTION MODEL number and has nothing to
+# do with this value.
+#
+# Raised to 41/78 on 2026-09-17 (T-039, same task): 5 new non_pizza_items.yaml
+# cases added (corpus growth per Part 4 — the corpus had ZERO non-pizza item
+# orders before this task, which is exactly why 73 cases never caught the
+# defect a real call did). 4/5 pass under the real rule-based interpreter as
+# authored (NONPIZZA-001/002/003/004); NONPIZZA-005's second turn ("the small
+# one") is a genuine, pre-existing RuleBasedInterpreter limitation — it has
+# no logic to match a bare size phrase against an open item-kind
+# disambiguation, unrelated to this task's fix — so it fails, honestly, not
+# tuned to pass. 37 (prior baseline) + 4 = 41.
 #
 # Raise this number ONLY after running the real command and confirming the
 # new count:
 #     python evals/runner.py score --adapter rule_based
 # Never lower it, and never raise it to a number you haven't actually
 # observed — either of those defeats the entire point of this gate.
-RULE_BASED_BASELINE = 36
+RULE_BASED_BASELINE = 41
 
 
 def test_all_golden_labels_are_valid():
@@ -43,7 +62,7 @@ def test_all_golden_labels_are_valid():
 
 def test_corpus_is_growing():
     """Guardrail against the corpus quietly rotting. Raise as it grows."""
-    assert len(_load(CASES)) >= 71
+    assert len(_load(CASES)) >= 78
 
 
 def test_rule_based_interpreter_meets_baseline():

@@ -2,6 +2,41 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+**T-039 is DONE (2026-09-17)** — closed a P0: `RuleBasedInterpreter` was
+silently substituting a different, real, priced item for one it couldn't
+resolve (a garden salad became a small cheese pizza; "a two liter coke"
+became a can), found by a real 10-turn T-038 Phase 2 voice session. Fix: a
+shared non-pizza-head-word veto in `interpreter.py`, plus promoting
+`orders.py`'s real `NON_PIZZA_ALIASES` precedence logic
+(`oe.non_pizza_alias_hits`) so `RuleBasedInterpreter` and `search_menu` share
+one table instead of two that silently drift apart. Also fixed: an internal
+line_id reaching the customer verbatim (`chat.py::_customer_safe_error_message`)
+and an unusable recording crashing the whole voice-loop process
+(`voice.py::turn()` now degrades gracefully). 16 new regression tests (one
+per real transcript row, verified to fail pre-fix), 5 new
+`evals/cases/non_pizza_items.yaml` cases — the corpus's first non-pizza item
+orders. Full reasoning: `docs/decisions/ADR-017-no-silent-item-substitution.md`.
+`validate` 78/78, rule-based ratchet 41/78 (real, observed growth — see
+STATUS.md "T-039 done" for the honest per-case breakdown), pricing parity
+50/50. **Live N=3 BLOCKED** — no `EXPLABS_API_KEY` in this environment;
+owner action needed. Recommended next task: **T-038 Phase 2's remaining
+item** below (real hardware voice loop) — explicitly paused for this task,
+now unblocked.
+
+**T-040 · `search_menu`'s single-hit reply always asks "What size would you
+like?", even for a topping or non-pizza item hit** — **Priority:** 3 ·
+**Status:** Not started. Found while verifying T-039: a `search_menu` hit
+of kind `topping` or `item` (e.g. "garden salad small and grilled with
+grilled chicken" resolving to a single `CHICKEN` topping candidate) still
+gets `chat.py::_reply_for_search_menu`'s generic "Did you mean Chicken?
+What size would you like?" — confusing for a hit that has no size at all.
+Not a correctness/substitution defect (T-039 already proved no cart
+mutation happens here) — a clarification-wording bug. Scope: make the
+follow-up question depend on the hit's `kind` (gourmet/item needing size →
+ask size; topping → ask which pizza/whether to add it; non-pizza item with
+no size variants → just confirm). Low priority (UX polish, not order
+correctness) but real and reproducible.
+
 **T-037 is DONE (2026-09-16)** — persistence + customer identity, the
 blocker STATUS.md has flagged High severity since early on. New
 `lakewood/persistence/` package: `SessionRepository` interface with

@@ -268,6 +268,22 @@ def _build_batched_clarification(pending: list[dict]) -> str:
     return "Also, " + "; and ".join(parts) + "?"
 
 
+# T-039 Part 3: a domain error's `message` is sometimes built from a raw
+# internal identifier (a line_id like "L5") that means nothing to a customer
+# and must never be spoken verbatim — a real live call had the assistant say
+# "L5 is not a pizza." Grep-verified against every err() call site in
+# orders.py: these two codes are the only ones whose message embeds a raw
+# line_id; every other code's message is written to be customer-safe as-is.
+_INTERNAL_ID_ERROR_CODES = {"BAD_LINE", "NOT_ON_PIZZA"}
+_INTERNAL_ID_FALLBACK = "Sorry, I couldn't apply that to your order — could you say that again?"
+
+
+def _customer_safe_error_message(r: dict) -> str:
+    if r.get("code") in _INTERNAL_ID_ERROR_CODES:
+        return _INTERNAL_ID_FALLBACK
+    return r.get("message", "Sorry, that didn't work.")
+
+
 def _reply_for(tool: str, r: dict) -> str:
     if tool == "request_quote":
         return r.get("readback", f"Your total is ${r.get('total', '?')}.")
@@ -358,7 +374,7 @@ def _finish_turn(chat: ChatState, made: list, debug: bool) -> TurnResult:
         return _apply_completion_guard(chat, TurnResult(_reply_for_search_menu(chat, r), made))
     if r.get("status") == "error":
         return _apply_completion_guard(
-            chat, TurnResult(r.get("message", "Sorry, that didn't work."), made))
+            chat, TurnResult(_customer_safe_error_message(r), made))
     return _apply_completion_guard(chat, TurnResult(_reply_for(tool, r), made))
 
 

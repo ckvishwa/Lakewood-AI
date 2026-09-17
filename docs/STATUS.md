@@ -3,9 +3,10 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-17 on Linux/offline (T-038 Phase 2 Parakeet increment),
-branch `codex/parakeet-stt` based on `6de7c38`. Real GPU numbers below were
-measured separately on the owner's Windows/WSL hardware.
+Last verified: 2026-09-17 on Windows/offline (T-039 silent item substitution
+fix), branch `codex/parakeet-stt`. Real GPU numbers in the T-038 Phase 2
+entry below were measured separately on the owner's Windows/WSL hardware and
+are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -20,6 +21,91 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-039 done, 2026-09-17: closed a P0 — `RuleBasedInterpreter` was silently
+substituting a different, real, priced item for one it couldn't resolve
+(a garden salad became a small cheese pizza; "a two liter coke" became a
+can), found by a real 10-turn T-038 Phase 2 voice session that 73 corpus
+cases, every synthetic fixture, and four prior diagnostic sweeps never
+caught.** Full mechanism, fix, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`; corpus-blind-spot
+argument: `docs/EVALS.md` "Real speech found a P0 the corpus never did."
+
+**Diagnosed before any fix, per row:** `_new_pizza` triggered on any
+recognized size word alone and unconditionally defaulted to
+`add_item(item="CHEESE PIZZA")`, never checking whether the utterance
+actually named a pizza; the bare-topping fallback then grafted any
+recognized topping word from ANY later utterance onto that line regardless
+of whether it was about that pizza (a calzone and a chicken caesar wrap were
+both scavenged this way across turns). "Two liter coke" → "1 can" and bare
+"can" (the modal verb in "can I get…") both traced to `_find_drink` using a
+second, independently-drifting copy of the drink alias table that never got
+T-032's precedence fix — a distinct gap, not a T-032 regression.
+`add_item`'s own domain layer was checked directly and was never the
+problem: any unresolved item name already returned `ITEM_NOT_FOUND` and
+mutated nothing — the interpreter just never asked it the real question.
+**`LLMInterpreter` does not share this defect** (no equivalent heuristic;
+verified both that a prompt-following model leaves the cart untouched on a
+miss, and that even a naive hallucinated `add_item` call still fails closed
+at the same domain-layer `ITEM_NOT_FOUND` check).
+
+**Fix:** one shared non-pizza-head-word veto in `interpreter.py` (routes to
+a real `search_menu` lookup instead of assuming pizza, regardless of a
+co-occurring size/topping/drink word or an already-open pizza line) plus
+promoting `orders.py`'s real, precedence-correct `NON_PIZZA_ALIASES`
+resolution (`oe.non_pizza_alias_hits`) to a shared function both
+`search_menu` and `RuleBasedInterpreter._find_drink` call — the private,
+drifting `_DRINK_WORDS` copy is deleted entirely, so this bug class (a fix
+landing in one of two duplicate tables) cannot recur by construction.
+
+**Two supporting bugs from the same session, also fixed:** a domain error's
+raw internal `line_id` ("L5 is not a pizza") was reaching the customer
+verbatim — `chat.py::_customer_safe_error_message` now masks the two codes
+(`BAD_LINE`, `NOT_ON_PIZZA`) grep-verified to embed one, leaving every other
+error code's already-customer-safe message untouched. `LocalVoiceLoop.turn()`
+had nothing catching `STTCallError`/`UnusableAudioError` (a real HTTP 422 on
+silence/noise/a hesitation), so an unusable recording killed the whole
+process — a dropped call on a phone line. It now degrades to a spoken
+apology and the loop continues into the next real turn.
+
+Verified regression tests (14 in `tests/test_item_substitution_guard.py`,
+2 in `tests/test_voice.py`): each row of the real transcript's defect table,
+the domain-layer fail-closed proof, both `LLMInterpreter` structural checks,
+and both internal-error-masking proofs — every one confirmed to FAIL against
+the pre-fix code before confirming it passes post-fix (stash-and-rerun, not
+assumed).
+
+**Corpus:** `evals/cases/non_pizza_items.yaml`, 5 new cases — the first
+non-pizza item orders (`WRAP`, `GARDEN SALAD SM`/`LG` ambiguity) in this
+corpus's history, a genuinely-missing item (`nachos`), and this defect's own
+compound unresolved-head-plus-topping-word shape.
+
+Offline: full suite 520 passed / 2 skipped / 2 xfailed (up from 504 — 16 new
+tests, zero regressions); `validate` 78/78 (was 73/73, pure corpus growth);
+rule-based ratchet 41/78 (was 36/73) — +1 from `DELIVERY-003` (a
+pre-existing corpus case independently found to trip the same bare-"can"
+collision this task fixes), +4 from 4/5 new corpus cases passing under the
+real interpreter as authored (`NONPIZZA-005`'s second turn is a genuine,
+unrelated, pre-existing `RuleBasedInterpreter` limitation, left honestly
+failing); pricing parity 50/50 unchanged. Full commands and output: "Latest
+verification" below.
+
+**N=3 sequential live run: BLOCKED, not run.** `docs/STATUS.md`'s prior live
+baselines (T-031/T-032, 53–56/73) all used `LAKEWOOD_LLM_PROVIDER=experiential`
+(`gpt-5.6-luna`); this environment has no `EXPLABS_API_KEY` configured, and
+this task did not touch `LLMInterpreter`, provider selection, prompts, or
+tool descriptions — nothing eligible for the paid-provider live measurement
+changed. Flagged rather than skipped silently or substituted with a
+different, non-comparable provider (`ANTHROPIC_API_KEY` is present but is
+this session's own credential, not `EXPLABS_API_KEY`, and swapping providers
+would not be comparable to the recorded band regardless). Owner action
+needed to close this specific measurement; everything else in this task's
+acceptance criteria is verified above.
+
+**Voice work resumes** — T-038 Phase 2's remaining item (the real
+microphone → Parakeet → PersistentChat → SAPI hardware loop, 10+ human
+turns, per-stage median/p95) was explicitly paused for this task per its own
+instructions and is unblocked now that this P0 is closed.
 
 **T-038 Phase 2 Parakeet increment PARTIALLY VERIFIED, 2026-09-17.** The
 local voice loop now has a production-shaped local STT boundary:
@@ -548,6 +634,31 @@ model tier (T-013, Ollama + local STT), are unaffected and preserved below;
 the OpenAI T-013c section further below is preserved as-is.
 
 ## Latest verification
+
+```
+python -m pytest --no-header (2026-09-17, T-039)          → 520 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 504 before
+                                                           this task — 16 new tests (14 substitution-
+                                                           guard + 2 voice-crash-recovery); zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78 (was 73/73 — 5 new
+                                                           non_pizza_items.yaml cases)
+python evals/runner.py score --adapter rule_based         → 41/78 (was 36/73) — +1 DELIVERY-003
+                                                           (pre-existing case, same bare-"can" bug),
+                                                           +4 of 5 new corpus cases; see "T-039 done"
+                                                           above for the honest per-case breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → BLOCKED — no EXPLABS_API_KEY in this
+                                                           environment; this task touched no
+                                                           LLMInterpreter/provider/prompt surface.
+                                                           T-032's 53/54/56 (mean 54.33) band is
+                                                           still the current live baseline.
+```
+
+Earlier verification (2026-09-16, T-037), still valid and unaffected by the
+above:
 
 ```
 python -m pytest --no-header (2026-09-16, T-037)         → 472 passed, 2 skipped (live-Postgres-
