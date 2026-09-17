@@ -73,5 +73,11 @@ ADR does not authorize that.
 Offline contract tests cover WAV validation, service outage/timeout behavior,
 HTTP rejection, malformed JSON, empty transcripts, provider selection, and the
 server's NeMo-output normalization. The real GPU benchmark above was run on the
-owner's machine. A full microphone -> Parakeet -> interpreter -> order engine ->
-SAPI loop remains the next hardware verification step.
+owner's machine. A subsequent 10-turn microphone -> Parakeet -> interpreter ->
+order engine -> SAPI run completed without a transport/provider/playback
+failure: median STT 0.320 s (p95/max at N=10: 0.391 s), median post-capture
+processing ~0.688 s. That run did **not** establish accuracy: the spoken ground
+truth was not labeled, at least two transcripts appear materially wrong, and
+the rule-based interpreter produced multiple wrong/incomplete order actions.
+The provider boundary is verified; human-speech STT accuracy and production
+order correctness are not.
