@@ -41,9 +41,29 @@ chooses the latency provider; it is not production-accuracy evidence.
 
 Offline verification: 508 collected, 504 passed / 2 skipped / 2 xfailed;
 `validate` 73/73; rule-based 36/73 (unchanged expected coverage); pricing
-parity 50/50. **Not yet verified here:** the real Windows microphone -> warm
-WSL Parakeet -> PersistentChat -> SAPI end-to-end loop. That hardware run,
-with at least 10 human turns and per-stage median/p95, is the next task.
+parity 50/50.
+
+**Real hardware E2E run completed after the offline verification:** 10/10
+turns passed through Windows microphone capture -> warm WSL Parakeet ->
+PersistentChat -> Windows SAPI with no service crash, timeout, empty result,
+or playback failure. Median/p95-at-N=10: capture 5.219/5.343 s, STT
+0.320/0.391 s, app 0.000/0.000 s, TTS synthesis 0.360/0.391 s, total
+5.899/6.235 s. Median measured processing after the fixed capture window was
+~0.688 s. Plumbing/latency therefore pass the local target; the fixed
+five-second capture window is now the dominant UX delay and needs VAD or
+push-to-stop endpointing.
+
+**Order correctness failed and T-038 remains PARTIAL.** The hardware run used
+`RuleBasedInterpreter`, whose 36/73 corpus score already says it is a demo
+pattern matcher, not production NLU. The real run reproduced that limitation
+at full severity: requested items/intensity were dropped, second-half scope
+became first-half or whole, and salad/calzone/wrap requests mutated an existing
+pizza. Safe refusals also occurred for menu phrases the matcher did not
+resolve. At least two Parakeet transcripts appear materially wrong, but the
+spoken ground truth was not captured, so an STT accuracy percentage would be
+fabricated. Do not merge these observations into one "voice accuracy" number:
+transport passed, latency passed, STT accuracy is unscored, and interpreter/
+order correctness failed.
 
 **T-038 Phase 1 done, 2026-09-16:** `PersistentChat` now wires the normal
 text path through `resume_or_create`, explicit accept/decline recovery, and

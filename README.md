@@ -19,7 +19,7 @@ did not agree to. Those are code properties, not prompt instructions.
 | Coupons | **Done** — 4 offers, never stack, code printed on the ticket |
 | Text order sandbox (`lakewood.chat`), rule-based mode | **Done** — headless, deterministic, no LLM/credentials |
 | Real LLM interpreter (Anthropic / OpenAI) | **Built, unit-tested — live benchmark blocked** on a funded API key, see below |
-| Local voice loop | **Built, offline-tested; Parakeet hardware E2E pending** |
+| Local voice loop | **Hardware plumbing verified; rule-based ordering failed the first human run** |
 | Production telephony | Not started |
 | Reconciliation report | Not started |
 

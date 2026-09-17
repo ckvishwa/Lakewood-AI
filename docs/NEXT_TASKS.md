@@ -48,11 +48,25 @@ after a same-file hardware benchmark: 0.082 s warm median for 2.586 s audio
 2.748 s (0.9x realtime, 0.95 GB RSS). ADR-016 records the decision. A warm,
 localhost-only WSL server (`scripts/parakeet_server.py`) and Windows-side
 `ParakeetProvider` are implemented; faster-whisper remains a fallback. Offline
-provider/error-path tests and the full repository suite are green. **Still
-required before Phase 2 is DONE:** run the real microphone -> Parakeet ->
-PersistentChat -> Windows SAPI loop on the owner's hardware, capture at least
-10 human turns (including negation, quantities, corrections and half scope),
-and report per-stage median/p95 plus transcript/order failures.
+provider/error-path tests and the full repository suite are green.
+
+**Hardware run completed 2026-09-17:** 10/10 microphone turns traversed the
+full capture -> warm WSL Parakeet -> PersistentChat -> Windows SAPI path with
+no transport/provider crash. Median capture 5.219 s, STT 0.320 s, app 0.000 s,
+TTS synthesis 0.360 s, total 5.899 s; observed maxima/p95 at N=10 were 5.343,
+0.391, 0.000, 0.391, and 6.235 s respectively. Post-capture processing was
+~0.688 s median. The fixed five-second recorder, not STT, dominates total
+latency and must be replaced by endpointing/VAD before a phone pilot.
+
+**Phase 2 is still NOT DONE because order correctness failed.** The run used
+the deliberately limited `RuleBasedInterpreter`: it dropped requested items
+and intensity, confused half scope, mapped salad/calzone/wrap requests onto an
+existing pizza, and failed ordinary non-pizza menu requests. At least two STT
+outputs also appear materially mistranscribed, but the spoken ground truth was
+not written down, so no honest STT accuracy rate can be calculated. Next:
+repeat a labeled, coherent human order flow through the actual candidate LLM
+interpreter, then add every observed STT/interpreter failure as a permanent
+fixture before changing prompts or parsing.
 
 **Scope:** pick/confirm the voice provider (ADR-004a, if not already
 resolved by the time this starts), build the call-handling loop that: (1)
