@@ -106,12 +106,75 @@ CASES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # cases = 50/81. Full mechanism and evidence:
 # `docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
 #
+# Raised to 61/91, then corrected to 58/91, same day (T-041: the evidence
+# check is a second retrieval system — unify it). See the full 61/91
+# derivation immediately below, then the correction after it — both kept,
+# not silently overwritten, per this file's own "never lower it" rule
+# meaning something different: a corrected label is not a regressed
+# interpreter.
+#
+# Raised to 61/91 on 2026-09-18 (T-041: the evidence check is a second
+# retrieval system — unify it). The T-039 live N=3 gate found the
+# mutation-boundary guard's own evidence vocabulary narrower than real,
+# non-adversarial customer language — a plural ("pizzas"), an intensity
+# word ("triple"), a spelled gourmet cardinal ("number ten"), and a
+# spelled quantity phrase ("six piece wings" vs "6PC WINGS") were each
+# wrongly refused, reproducibly, across all 3 live runs. Root-caused to
+# search_menu having the IDENTICAL gaps (proven directly:
+# `search_menu(sess, "number ten")`/`"six piece wings"`/`"large pizzas"`/
+# `"sodas"` all returned NO_MATCH before this task) — fixed with ONE shared
+# normalizer (`oe.normalize_menu_text`/`oe.normalize_spoken_numbers`),
+# consumed by both `search_menu` and the interpreter's evidence-matching
+# layer, not four independent patches. Also fixed the LLM/rule-based
+# narrowing asymmetry the gate's own NONPIZZA-006 flakiness pointed at
+# (`_narrow_pending_disambiguations`, interpreter.py) — a model's own
+# clarifying reply with no tool call now deterministically narrows
+# `pending_disambiguations` the same way `RuleBasedInterpreter` already
+# does, instead of only by the accident of an extra `search_menu` call.
+# 10 new corpus cases added (`evals/cases/t041_evidence_gaps.yaml`: 4 named
+# gap regressions + the 6 "voice session noun" utterances from the
+# ORIGINAL T-038 real-call P0 that found T-039 in the first place —
+# calzone/chicken-caesar-wrap/appetizer/soup/tacos/garlic-bread — which had
+# no live corpus coverage until this task). Net: 50 (T-039B baseline) + 1
+# genuine flip (`GOURMET-013`, "half number ten Hawaiian, half number eight
+# BBQ chicken" — the digit-only `_HH_BY_NUMBER_RE` half-by-number match now
+# resolves after `RuleBasedInterpreter.interpret`'s own text is normalized
+# at intake) + 10 new passing cases = 61/91. Zero regressions on the prior
+# 81 cases (checked directly, case ID for case ID, not assumed). Full
+# mechanism, the safety-line re-verification (all three T-039B adversarial
+# cases still refuse; still exactly three `_AUTHORIZED_REASONS`), and
+# evidence: `docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-041
+# amendment; `tests/test_t041_evidence_vocabulary.py`.
+#
+# Corrected to 58/91, same day (T-041, after the live N=3 gate): the live
+# gate itself surfaced 3 LABEL DEFECTS in the 4 gap-regression cases just
+# authored above — `QTY-PLURAL-001`, `INTENSITY-WORD-001`,
+# `WINGS-QTY-WORD-001` each asserted a cart matching
+# RuleBasedInterpreter's OWN separate, pre-existing limitations (no
+# multi-item-from-one-utterance creation; text never maps to DOUBLE/TRIPLE
+# intensity; T-040's single-non-pizza-hit-always-asks-size UX bug) rather
+# than the objectively correct customer-facing answer. The real
+# ExperientialProvider (gpt-5.6-luna) got all 3 right, identically, in all
+# 3 live runs (3 medium cheese pizzas -> $39.00; TRIPLE-intensity pepperoni
+# -> $17.00; 6PC WINGS added directly on a unique unambiguous hit ->
+# $8.00) — proof the ORIGINAL labels were wrong, not the model. Relabeled
+# to the correct carts (same category as T-039A's `ADV-002`/`ADV-004`/
+# `COUPON-002`/`INVALID-002` relabeling — a corrected label is not an
+# interpreter regression). RuleBasedInterpreter now honestly fails all 3
+# (58/91, down from the mislabeled 61/91) — same documented-limitation
+# shape as `MOD-020`/`GOURMET-005`'s own DOUBLE-intensity misses and the
+# newly-filed T-040 UX issue. `GOURMET-CARDINAL-001` and the 6 voice-noun
+# cases are unaffected (labels were correct; only these 3 required
+# correction). Full live-gate evidence: `docs/STATUS.md`'s T-041 live-gate
+# entry.
+#
 # Raise this number ONLY after running the real command and confirming the
 # new count:
 #     python evals/runner.py score --adapter rule_based
-# Never lower it, and never raise it to a number you haven't actually
-# observed — either of those defeats the entire point of this gate.
-RULE_BASED_BASELINE = 50
+# Never lower it to hide a real interpreter regression — a corrected,
+# previously-wrong label is not that; never raise it to a number you
+# haven't actually observed either.
+RULE_BASED_BASELINE = 58
 
 
 def test_all_golden_labels_are_valid():
@@ -122,7 +185,7 @@ def test_all_golden_labels_are_valid():
 
 def test_corpus_is_growing():
     """Guardrail against the corpus quietly rotting. Raise as it grows."""
-    assert len(_load(CASES)) >= 81
+    assert len(_load(CASES)) >= 91
 
 
 def test_rule_based_interpreter_meets_baseline():

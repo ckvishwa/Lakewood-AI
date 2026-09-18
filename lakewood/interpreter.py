@@ -141,8 +141,21 @@ _QUANTITY_WORD_RE = re.compile(
     r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
 # "pie" is common colloquial slang for pizza ("a plain pie, medium") — as
 # strong an explicit-pizza signal as the word "pizza" itself, not a shorthand
-# grammar token to be balanced against a residual.
-_PIZZA_WORD_RE = re.compile(r"\bpizza\b|\bpie\b", re.I)
+# grammar token to be balanced against a residual. T-041: plural tolerance
+# ("three medium cheese pizzas") — \bpizza\b alone never matches "pizzas"
+# since \b requires a non-word boundary immediately after the "a", which a
+# trailing "s" is not; found live (docs/STATUS.md's T-041 entry) blocking
+# every plural multi-item pizza order.
+_PIZZA_WORD_RE = re.compile(r"\bpizzas?\b|\bpies?\b", re.I)
+# T-041: intensity words the domain's own add_modifier already accepts
+# (NORMAL/DOUBLE/TRIPLE/LITE/NONE — see TOOLS' add_modifier schema) but the
+# shorthand-residual grammar never consumed as evidence of pizza intent —
+# found live: "small cheese with triple pepperoni" (and even plain "extra
+# pepperoni") left "triple"/"extra" in the residual and wrongly blocked a
+# plainly pizza-shaped direct order. Negation ("no") and LITE ("light"/
+# "easy on") already have their own regexes below; this is the missing
+# NORMAL/DOUBLE/TRIPLE tier.
+_INTENSITY_WORD_RE = re.compile(r"\bextra\b|\bdouble\b|\btriple\b|\bquadruple\b", re.I)
 
 
 def _pizza_shorthand_residual(t: str) -> str:
@@ -161,7 +174,8 @@ def _pizza_shorthand_residual(t: str) -> str:
     residual = t
     for pattern in (_HALF_A_HALF_B_RE, _HH_BY_NUMBER_RE, _ONE_HALF_RE,
                     _OTHER_HALF_RE, _BARE_HALF_RE, _NEGATION_RE, _LITE_RE,
-                    _QUANTITY_WORD_RE, _PIZZA_SHORTHAND_FILLER_RE):
+                    _INTENSITY_WORD_RE, _QUANTITY_WORD_RE,
+                    _PIZZA_SHORTHAND_FILLER_RE):
         residual = pattern.sub(" ", residual)
     for phrase in _TOPPING_VOCAB:  # includes bare "cheese"; longest-first
         residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
@@ -226,11 +240,16 @@ def _words_present(phrase: str, text: str) -> bool:
 def _search_query_supported_by_utterance(query: str, text: str) -> bool:
     """The model's query is never evidence; every identifying query token
     must already be present in the customer's current utterance."""
+    # T-041: the model's own query is a SEPARATE data source from the
+    # customer utterance (not something normalize_menu_text has already
+    # touched upstream) — normalize it here so "6 piece wings" and
+    # "six piece wings" are recognized as the same query shape either way.
+    query = oe.normalize_menu_text(query or "")
     filler = {
         "a", "an", "the", "i", "id", "i'd", "want", "like", "get", "give",
         "me", "please", "order", "some", "one", "of", "menu", "item",
     }
-    words = [w for w in re.findall(r"[a-z0-9]+", (query or "").lower())
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower())
              if w not in filler]
     return bool(words) and all(re.search(rf"\b{re.escape(w)}\b", text.lower()) for w in words)
 
@@ -362,6 +381,45 @@ def _select_pending_candidate(text: str, pending_candidates: list[dict]):
     return "NARROWED", candidates
 
 
+def _narrow_pending_disambiguations(session: "oe.Session", text: str) -> None:
+    """T-041: the LLM-path counterpart of RuleBasedInterpreter's own
+    NARROWED handling in `_resolve_clarification` — found missing by the
+    T-039 live N=3 gate (NONPIZZA-006: "I want a salad." -> "The garden
+    one." -> "Large." failed 1 of 3 live runs with an unnecessary
+    `transfer_to_human`, passed the other 2 only by the accident of the
+    model happening to issue an extra `search_menu` call that incidentally
+    registered an already-narrowed candidate set).
+
+    RuleBasedInterpreter always re-parses the customer's own utterance
+    against `session.pending_disambiguations` every turn and persists a
+    NARROWED result via `oe._narrow_disambiguation` (see its own
+    `_resolve_clarification`). The LLM path only ever reached
+    `_select_pending_candidate` from INSIDE `_authorize_item_creation` —
+    i.e. only on a turn where the model happened to call `add_item`. A
+    turn where the model just asks its own clarifying question (no tool
+    call at all) left `pending_disambiguations` completely untouched,
+    so a later bare-attribute reply ("Large.") had to resolve against the
+    ORIGINAL, wider, multi-family candidate set — which
+    `_select_pending_candidate` correctly refuses to guess across.
+
+    This function closes that gap the same way: deterministic,
+    customer-utterance-only, run once per turn regardless of what the
+    model does this turn, and NEVER selects/authorizes a mutation by
+    itself (that stays `_authorize_item_creation`'s job alone) — it only
+    ever narrows one ambiguous set down to a smaller ambiguous set. A
+    mutation to `pending_disambiguations` (clarification bookkeeping), not
+    the cart — the same distinction `PersistentChat`'s own persistence
+    fingerprint already treats as separate from an authorized `add_item`.
+    """
+    for entry in session.pending_disambiguations:
+        item_cands = [c for c in entry.get("candidates", []) if c.get("kind") == "item"]
+        if len(item_cands) < 2:
+            continue
+        outcome, narrowed = _select_pending_candidate(text, item_cands)
+        if outcome == "NARROWED" and len(narrowed) < len(item_cands):
+            oe._narrow_disambiguation(session, entry["candidates"], narrowed)
+
+
 def _authorize_item_creation(item_key: str, size, gourmet_number, second_gourmet_number,
                              text: str, search_hits: list[dict],
                              pending_disambiguations: list[dict]) -> str:
@@ -397,6 +455,13 @@ def _authorize_item_creation(item_key: str, size, gourmet_number, second_gourmet
     utterance's own words against it. The model can request a selection,
     it can never manufacture one.
     """
+    # T-041: normalize the customer's own utterance ONCE, at this single
+    # LLM-path evidence entry point — the exact same shared normalizer
+    # RuleBasedInterpreter.interpret applies at its own entry point, so a
+    # spelled number/quantity-piece phrase ("number ten", "six piece wings")
+    # is real evidence on BOTH paths, never just one. Idempotent, so any
+    # sub-check below normalizing again is harmless.
+    text = oe.normalize_menu_text(text)
     creates_pizza = item_key in ("PIZZA", "CHEESE PIZZA") \
         or gourmet_number is not None or second_gourmet_number is not None
 
@@ -521,8 +586,13 @@ class RuleBasedInterpreter:
         # Strip sentence punctuation but keep commas — clause-splitting in
         # _new_pizza depends on them to scope a half-modifier to the right
         # topping ("pepperoni, mushroom only on one half" must not leak
-        # "one half" onto pepperoni).
-        t = re.sub(r"[.!?]+", "", text.strip().lower())
+        # "one half" onto pepperoni). T-041: normalize spelled numbers/
+        # quantity-piece phrasing ONCE here, at intake, so every downstream
+        # regex (_HH_BY_NUMBER_RE's digit-only half-by-number match,
+        # _select_pending_candidate's "6pc" word check) sees the same
+        # canonical form real speech and typed text both need — one
+        # normalizer, shared with search_menu (see oe.normalize_menu_text).
+        t = oe.normalize_menu_text(re.sub(r"[.!?]+", "", text.strip().lower()))
         sess = chat.session
 
         # 0. Answering a pending clarification from the previous turn.
@@ -999,6 +1069,12 @@ class LLMInterpreter:
         return result
 
     def _interpret_staged(self, chat: ChatState, text: str) -> Interpretation:
+        # T-041: deterministic, customer-evidence-only narrowing of any
+        # outstanding pending_disambiguations, run once per turn regardless
+        # of what tool call (if any) the model makes — see
+        # _narrow_pending_disambiguations' own docstring for the exact
+        # asymmetry this closes (NONPIZZA-006 in the T-039 live N=3 gate).
+        _narrow_pending_disambiguations(chat.session, oe.normalize_menu_text(text))
         executed = []
         last_new_line_id = None
         search_hits_this_turn: list[dict] = []

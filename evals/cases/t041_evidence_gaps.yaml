@@ -1,0 +1,177 @@
+# T-041: retrieval/evidence-vocabulary regression cases. Each case here
+# proves a specific gap found by the T-039 live N=3 acceptance gate
+# (docs/STATUS.md's T-041 entry) was closed at its root — real language
+# shapes that used to reach _has_pizza_intent/search_menu/the evidence
+# check and fail there, not a hypothetical.
+#
+# Plus: the six "voice session noun" utterances from the ORIGINAL T-038
+# real-call P0 (ADR-017) that found the substitution defect in the first
+# place — calzone, chicken caesar wrap, appetizer, soup, tacos, garlic
+# bread. None of these were ever live corpus cases before this task; only
+# offline direct-reproduction existed (ADR-017's own diagnosis table).
+# "Real speech found a P0 the corpus never did" (docs/EVALS.md) — leaving
+# the exact utterances that found it uncovered means the next regression
+# in this shape is invisible again.
+
+- id: QTY-PLURAL-001
+  tags: [multi_item, quantity, cheese]
+  # Plural gap: _PIZZA_WORD_RE was \bpizza\b, which \b-anchoring never
+  # matches against "pizzas" (no non-word boundary after a trailing "s").
+  # Before the fix this utterance never even reached pizza creation at all
+  # — it fell through to a bare search_menu miss. LABEL CORRECTED after
+  # the T-041 live N=3 gate: the real ExperientialProvider correctly
+  # creates 3 MEDIUM CHEESE PIZZA (quantity=3, $39.00) in all 3 runs,
+  # authorized via DIRECT_UTTERANCE_EVIDENCE — the objectively correct
+  # answer, which this label originally under-specified (a $13.00
+  # single-pizza expectation matching RuleBasedInterpreter's own separate,
+  # pre-existing "no multi-item-from-one-utterance" limitation, not the
+  # correct customer-facing behavior this corpus should assert).
+  # RuleBasedInterpreter fails this case honestly, same shape as
+  # MOD-020/GOURMET-005's documented DOUBLE-intensity misses.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Three medium cheese pizzas."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: medium, quantity: 3}}
+  assert_final: {subtotal: "39.00", state: BUILDING}
+
+- id: INTENSITY-WORD-001
+  tags: [modifier, intensity, cheese]
+  # Intensity-vocabulary gap: "triple" (and "extra"/"double"/"quadruple")
+  # were never consumable by the pizza-shorthand residual grammar, so a
+  # plainly pizza-shaped direct order was blocked outright. LABEL
+  # CORRECTED after the T-041 live N=3 gate: the real ExperientialProvider
+  # correctly adds pepperoni at intensity=TRIPLE ($17.00 total) in all 3
+  # runs — the objectively correct answer; this label originally asserted
+  # NORMAL-intensity pricing ($13.00), matching RuleBasedInterpreter's own
+  # separate, pre-existing "text never maps to DOUBLE/TRIPLE" limitation,
+  # not the correct customer-facing behavior. RuleBasedInterpreter fails
+  # this case honestly, same shape as MOD-020/GOURMET-005.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Small cheese with triple pepperoni."
+      calls:
+        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
+        - {tool: add_modifier, args: {line_id: L1, modifier: pepperoni, intensity: TRIPLE}}
+  assert_final: {subtotal: "17.00", state: BUILDING}
+
+- id: GOURMET-CARDINAL-001
+  tags: [gourmet, item_selection]
+  # Gourmet spelled-cardinal gap: search_menu's own _NUMBER_PREFIX_RE was
+  # digit-only ("number 10"), so "number ten" — ordinary spoken English,
+  # not an edge case — was a flat NO_MATCH before oe.normalize_spoken_numbers
+  # existed. Single-turn: the follow-up "what size" flow is T-040's own
+  # filed, separate issue (search_menu's single-hit reply wording), not
+  # this gap.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Number ten."
+      calls:
+        - {tool: search_menu, args: {query: "number ten"}}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: WINGS-QTY-WORD-001
+  tags: [item_selection, non_pizza_item]
+  # Spelled-quantity-to-abbreviated-SKU gap: "6PC WINGS" never matched
+  # "six piece wings" — neither search_menu's own filler-stripping nor the
+  # evidence check's word-presence test had any spelled-number handling.
+  # oe.normalize_menu_text (spelled number -> digit, then "N piece" -> "Npc")
+  # closes it for both callers at once. LABEL CORRECTED after the T-041
+  # live N=3 gate: "six piece wings" resolves to a SINGLE, unambiguous
+  # search_menu hit (6PC WINGS, not the ambiguous bare "wings"), so the
+  # real ExperientialProvider correctly adds it directly
+  # (UNIQUE_SUPPORTED_SEARCH_RESULT, $8.00) in all 3 runs — this label
+  # originally asserted a refusal, matching RuleBasedInterpreter's own
+  # separate, pre-existing, already-filed T-040 limitation (a single
+  # non-pizza search hit always asks "what size?" instead of adding),
+  # not the correct customer-facing behavior. RuleBasedInterpreter fails
+  # this case honestly (see T-040, docs/NEXT_TASKS.md).
+  setup: {order_type: pickup}
+  turns:
+    - user: "Six piece wings."
+      calls:
+        - {tool: search_menu, args: {query: "six piece wings"}}
+        - {tool: add_item, args: {item: "6PC WINGS"}}
+  assert_final: {subtotal: "8.00", state: BUILDING}
+
+- id: VOICE-CALZONE-001
+  tags: [non_pizza_item, adversarial]
+  # T-038's real 10-turn session, row 2 (ADR-017): "One calzone with
+  # mozzarella and ricotta" silently became topping words grafted onto a
+  # fabricated cheese pizza. Correct behavior: never create a pizza, never
+  # guess CALZONE from the compound phrase — search, then genuinely miss
+  # or ask, exactly as it does today.
+  setup: {order_type: pickup}
+  turns:
+    - user: "One calzone with mozzarella and ricotta."
+      calls:
+        - {tool: search_menu, args: {query: "calzone with mozzarella and ricotta"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: VOICE-WRAP-CAESAR-001
+  tags: [non_pizza_item, adversarial]
+  # T-038's real session, row 3: "One chicken caesar wrap with fries"
+  # became topping words grafted onto the SAME fabricated pizza line
+  # (chicken, mozzarella, chicken). No caesar wrap variant or fries exist
+  # on this menu (only WRAP) — never a pizza, never a guessed real SKU.
+  setup: {order_type: pickup}
+  turns:
+    - user: "One chicken caesar wrap with fries."
+      calls:
+        - {tool: search_menu, args: {query: "chicken caesar wrap with fries"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: VOICE-APPETIZER-001
+  tags: [non_pizza_item, adversarial]
+  # T-039A adversarial reproduction (ADR-017 Amendment table): "A small
+  # appetizer with chicken" — no generic "appetizer" SKU exists; must
+  # never become a fabricated small cheese pizza with chicken.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A small appetizer with chicken."
+      calls:
+        - {tool: search_menu, args: {query: "small appetizer with chicken"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: VOICE-SOUP-001
+  tags: [non_pizza_item, adversarial]
+  # T-039A adversarial reproduction: "A large soup with bacon" — no soup
+  # on this menu; must never become a fabricated large cheese pizza with
+  # bacon.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A large soup with bacon."
+      calls:
+        - {tool: search_menu, args: {query: "large soup with bacon"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: VOICE-TACOS-001
+  tags: [non_pizza_item, adversarial]
+  # T-039A adversarial reproduction: "A medium tacos with onions" — no
+  # tacos on this menu; must never become a fabricated medium cheese pizza
+  # with onions.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A medium tacos with onions."
+      calls:
+        - {tool: search_menu, args: {query: "medium tacos with onions"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: VOICE-GARLICBREAD-001
+  tags: [non_pizza_item, adversarial]
+  # T-039A adversarial reproduction: "A small garlic bread with chicken" —
+  # no garlic bread on this menu; must never become a fabricated small
+  # cheese pizza with chicken.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A small garlic bread with chicken."
+      calls:
+        - {tool: search_menu, args: {query: "small garlic bread with chicken"}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}

@@ -777,6 +777,117 @@ step, not the microphone loop; re-run this same N=3 gate once T-041 lands
 to confirm the historical-overlap recovers without reintroducing any
 authorization bypass.
 
+## T-041 evidence-vocabulary fix, live N=3 re-acceptance gate, 2026-09-18
+
+Re-ran the identical live gate (`experiential`/`gpt-5.6-luna`, same
+config, same day) after closing the four evidence-vocabulary gaps and the
+LLM/rule-based narrowing asymmetry T-041 found (full mechanism:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-041
+amendment).
+
+```
+                 full/91 (raw)  full/91 (corrected labels)  overlap/73  provider fails
+Run 1            62             65                          48          1 (NONPIZZA-007, HTTP 502)
+Run 2            64             67                          49          0
+Run 3            59             62                          44          0
+mean             61.7           64.7                        47.0
+```
+
+"Corrected labels" accounts for a label-authoring finding from this same
+gate (below) — 3 newly-authored regression cases asserted the wrong cart;
+the raw column is what the ORIGINAL (wrong) labels measured, the corrected
+column is what the same real trace data measures against the fixed
+labels. Neither number is fabricated or re-run — both come directly from
+the 3 real trace files.
+
+**Primary objective — zero silent substitutions — holds, re-confirmed:**
+every `add_item` across all 3 runs (277 calls with a reason code) scanned
+programmatically for a bypass (an `ok` result whose reason isn't one of
+the three authorized codes). **Zero found, in every run.** Zero internal
+error/reason-code leaks into any customer reply.
+
+**The rejection ratio inverted — the signal the task's own instructions
+said to look for as proof the fix reached the real problem, not a
+symptom:**
+
+```
+                                     Run1  Run2  Run3
+DIRECT_UTTERANCE_EVIDENCE             44    44    45
+UNIQUE_SUPPORTED_SEARCH_RESULT        11    10     8
+CUSTOMER_CONFIRMED_PENDING_CANDIDATE   6     7     7
+AMBIGUOUS_CANDIDATE_NOT_CONFIRMED      1     2     1
+UNSUPPORTED_ITEM_SUBSTITUTION         32    31    28
+```
+
+Before T-041: `UNSUPPORTED_ITEM_SUBSTITUTION` (60/56/61) exceeded
+`DIRECT_UTTERANCE_EVIDENCE` (37/36/36) in every run — the guard refused
+more than it allowed. After: allowed (44/44/45) now exceeds refused
+(32/31/28) in every run.
+
+**Historical-overlap mean recovered from 40.33 to 47.0 (+6.67) — a real,
+partial recovery, NOT the full T-032 pre-guard band (54.33).** Checked
+directly which overlap cases still fail rather than assumed: `CORRECT-
+003/004/006/007`, `NEG-003/005/007`, `MULTI-001/002/004/005/006`,
+`QTY-003`, `MOD-014/030/035/036`, `GOURMET-005/010/011/013`,
+`SLANG-001/003`, `DECLINE-001`, `FAQ-001`, `ADV-001`, `CONFIRM-002`,
+`DELIVERY-002`, `TRANSFER-003/004`, `DISAMBIG-CAP-001` — multi-item
+ordering, negation handling, coupon math, and confirmation-flow accuracy,
+none of them an item-creation-authorization defect. Per this task's own
+instruction ("recovering to ~54 is the target... recovering past it while
+substitutions stay 0 would be suspicious — check for a weakened check
+before celebrating"): the check was NOT weakened (`_AUTHORIZED_REASONS`
+still has exactly three members, all three T-039B adversarial cases still
+refuse — see `tests/test_t041_evidence_vocabulary.py`), and the score
+correctly did NOT recover past 54.33, consistent with real, unrelated,
+already-tracked capability gaps remaining rather than the guard having
+been loosened.
+
+**A genuine, interesting model-accuracy finding, unrelated to
+authorization:** `GOURMET-010` ("medium number ten, extra pepperoni just
+on one half") is now correctly AUTHORIZED in every run (previously fully
+blocked) but consistently mispriced ($24.00 vs the label's $21.50) — the
+model interprets "extra pepperoni" as `intensity=DOUBLE`, while the label
+expects a plain single addition. A real MODEL_CAPABILITY question (should
+"extra X" on a half-portion mean "add X" or "double X"?), not a
+substitution, not a T-041 defect, and out of this task's scope
+(modifier-intensity semantics, not item-creation authorization).
+
+**T-039-specific case review (the calzone/wrap/appetizer/soup/tacos/
+garlic-bread utterances from the original T-038 real-call P0, plus the new
+gourmet-cardinal case): all 7 passed in ALL 3 runs, 21/21.** Classified
+`SAFE_REFUSAL` throughout — cart stayed empty in every single instance
+across all 3 runs, even on turns where a real (non-fabricated) `search_
+menu` hit came back along the way. This is the exact original defect
+class; it does not reappear.
+
+**Label-authoring finding, reported at full severity even though it was
+this task's own mistake:** 3 of the 4 new gap-regression cases
+(`QTY-PLURAL-001`, `INTENSITY-WORD-001`, `WINGS-QTY-WORD-001`) originally
+asserted a cart matching `RuleBasedInterpreter`'s own SEPARATE, pre-
+existing capability limits — not the objectively correct answer. The real
+model got all 3 right, identically, in all 3 live runs, which is what
+exposed the mislabeling. Per the task's own rule ("do not edit... corpus
+labels... during the three runs"), all 3 runs completed against the
+original (wrong) labels before any correction was made; labels were fixed
+only afterward. `RuleBasedInterpreter` now honestly fails all 3 post-
+correction (58/91 ratchet, down from the mislabeled 61/91) — same
+documented-limitation shape as `MOD-020`/`GOURMET-005`'s own DOUBLE-
+intensity misses, plus the newly-filed T-040 UX issue for the wings case.
+
+**Provider usage across the 3 runs:** 413/422/398 requests, ~550K/562K/
+530K total tokens, mean latency 1.84s/1.84s/1.86s (median 1.69s/1.67s/
+1.65s, p95 3.20s/2.89s/2.86s), $0.00 provider-reported cost on every
+request (unchanged: Experiential reports no `usage.cost` for this model).
+Schema violations: 0 in every run. Hallucinated-SKU calls (all safe
+domain-layer rejections, never mutations): 47/48/41.
+
+**Verdict: T-038 Phase 2 (real-hardware voice loop) is UNBLOCKED.** The
+primary, P0-relevant objective is fully closed and re-confirmed live
+across 3 independent runs with zero regressions; the residual overlap gap
+to T-032's band is a collection of already-tracked, unrelated model-
+capability limitations, not a reason to keep gating hardware work on this
+specific substitution-safety measurement.
+
 ## Release gate
 
 **This is the future production-model gate (PLANNED — no real `score

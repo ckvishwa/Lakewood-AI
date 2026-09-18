@@ -14,7 +14,13 @@ returned during the same turn as authorization, including a hit returned
 under `needs_disambiguation=True` and a hit for a query the model invented
 with no support in the customer's own words. See "Amendment: retrieval is
 not customer authorization (T-039B)" after the T-039A amendment for the
-current mechanism.
+current mechanism. **Amended a third time 2026-09-18 (T-041), same day.**
+The live N=3 acceptance gate T-039B deferred found the guard's own
+evidence-matching vocabulary narrower than real customer language. See
+"Amendment: the evidence check is a second retrieval system — unify it
+(T-041)" at the end of this document. The authorization DECISION LOGIC is
+unchanged; only the evidence VOCABULARY it matches against grew, via one
+shared normalizer with `search_menu` rather than four independent patches.
 
 ## Context
 
@@ -530,3 +536,233 @@ specifically needed durability.
 - Full suite: 561 passed, 2 skipped, 2 xfailed (was 546 passed — 15 new
   tests, zero regressions).
 - No change to `orders.py`'s FSM or any pricing logic.
+
+## Amendment: the evidence check is a second retrieval system — unify it (T-041)
+
+**T-039B's deferred live acceptance gate ran (`gpt-5.6-luna`/experiential,
+N=3, full task in `docs/STATUS.md`'s T-039 entry): zero silent
+substitutions across 316 `add_item` calls — the P0 stayed closed — but the
+comparable 73-case historical score fell from the T-032 band (53/54/56) to
+41/39/41.** The refusal path ran hotter than the success path
+(`UNSUPPORTED_ITEM_SUBSTITUTION` 56-61 per run vs `DIRECT_UTTERANCE_
+EVIDENCE` 36-37) — not the shape of a guard correctly refusing adversarial
+substitutions, but of a guard unable to see support that was plainly
+present in the customer's own words.
+
+### Part 1 — the architectural question, answered before any patch
+
+**What did `_authorize_item_creation`'s evidence check do, precisely?**
+`_has_pizza_intent`: a literal `\bpizza\b|\bpie\b` regex, singular only, or
+a fully-consumed "shorthand residual" grammar with no plural tolerance and
+no "extra"/"double"/"triple"/"quadruple" in its consumable vocabulary
+(confirmed directly: "extra" failed too, not just "triple"/"quadruple").
+`_item_hit_supported_by_utterance`'s gourmet branch: a private, digit-only
+`(?:#|\bnumber\s*)\d+\b` regex, no cardinal-word support.
+`_select_pending_candidate`: word-presence scoring with no alias table for
+non-size tokens like "6PC". Sizes and toppings were ALREADY shared with
+`search_menu` via `oe.SIZE_ALIASES`/`oe.ALL_TOPPINGS`/`oe.ALIASES` — the
+gaps were narrower than "two independent systems," but real.
+
+**What does `search_menu` do that the evidence check doesn't, and could
+the evidence check just reuse it?** Checked directly against the real
+function, not assumed:
+
+```
+search_menu(sess, "number ten")      -> NO_MATCH
+search_menu(sess, "six piece wings") -> NO_MATCH
+search_menu(sess, "large pizzas")    -> NO_MATCH
+search_menu(sess, "sodas")           -> NO_MATCH
+```
+
+**`search_menu` had the IDENTICAL gaps in production, not just the
+evidence layer.** This settles the question: these are not "two systems
+with different jobs" needing separate treatment — both are answering *do
+these words denote this SKU*, and both failed on the same three input
+shapes for the same underlying reason (no spelled-number-to-digit
+conversion, no plural tolerance). Unifying doesn't just avoid duplicating
+a fix — it fixes a live `search_menu` bug that duplicating would have left
+in place.
+
+**Chosen mechanism:** one new normalizer in `orders.py` (the domain layer
+that already owns `ALIASES`/`SIZE_ALIASES`/`NON_PIZZA_ALIASES`) —
+`normalize_spoken_numbers`/`normalize_menu_text` — consumed by both
+`search_menu`'s own query handling and the interpreter's evidence-matching
+layer. Not a fourth independent patch; the fifth gap this shape would
+otherwise produce is now structurally impossible, the same argument T-039
+already made for `non_pizza_alias_hits` replacing the duplicated
+`_DRINK_WORDS` table.
+
+**A real design correction found DURING implementation, not designed for
+up front:** the first version of `normalize_spoken_numbers` converted
+every standalone spelled number anywhere in the text ("one" -> "1"
+unconditionally) and broke `_ONE_HALF_RE`'s "on one half"/"a half"
+half-portion idiom outright — caught by the full test suite
+(`test_retroactive_removal_scoped_to_the_correct_half_only` went red).
+"One" means something completely different in "no cheese on one half"
+than it does in "number one" or "six piece wings" — a blanket word-to-
+number converter is NOT the same problem as `search_menu`'s narrower,
+context-anchored one. **Fixed by anchoring the conversion to the two
+contexts a real order actually spells a number in**: immediately after a
+number-reference word (`number`/`num`/`no.`/`#`) or immediately before a
+piece-count word (`piece(s)`/`pc`) — never a bare standalone word.
+Deliberately NOT a general-purpose word-to-number converter; a customer
+saying a bare, unqualified "twenty seven" with no surrounding context is
+NOT converted, since no evidenced corpus/live case needs it and a broader
+conversion already proved unsafe once.
+
+### Part 2 — the four gaps, closed at the root
+
+1. **Plural** (`_PIZZA_WORD_RE`): `\bpizza\b` was fixed to `\bpizzas?\b|
+   \bpies?\b` — `\b` never matches inside "pizzas" (no non-word boundary
+   after a trailing "s"). Same fix applied to `search_menu`'s own CHEESE
+   PIZZA pseudo-hit regex and `_GENERIC_PIZZA_WORDS` (found failing
+   identically: `search_menu(sess, "large pizzas")` was `NO_MATCH`).
+   `oe.non_pizza_alias_hits` gained the same plural tolerance
+   (`"sodas"`/`"bottles"` now resolve), benefiting both callers at once
+   (interpreter.py's direct-evidence branch already calls this exact
+   function).
+2. **Intensity vocabulary**: `_INTENSITY_WORD_RE` (`extra`/`double`/
+   `triple`/`quadruple`) added to the shorthand-residual consumption
+   loop — the domain's own `add_modifier` already accepts all four
+   intensities; only the pizza-INTENT gate had never heard of them.
+   RuleBasedInterpreter's own text-to-intensity extraction still only
+   distinguishes NORMAL/NONE/LITE (a separate, pre-existing, already-
+   documented limitation — `MOD-020`/`GOURMET-005`'s own honest DOUBLE-
+   intensity rule-based misses, unchanged by this task) — out of scope
+   here; this fix is about the pizza no longer being wrongly BLOCKED, not
+   about teaching `RuleBasedInterpreter` new pricing-argument extraction.
+3. **Gourmet numbers, spelled**: `normalize_spoken_numbers` converts
+   "number ten" -> "number 10" before either `search_menu` or the
+   evidence check's gourmet-hit regex ever sees the text — both now
+   resolve identically regardless of which form arrived.
+4. **Spelled quantity -> abbreviated SKU**: `normalize_menu_text` chains
+   spelled-number conversion into the existing digit-based "N piece" ->
+   "Npc" collapse, so "six piece wings" -> "6pc wings", matching
+   "6PC WINGS" the same way "6 piece wings" already did.
+
+Each gap was reproduced directly against the pre-fix code (not assumed)
+and re-verified post-fix, unit-level, in
+`tests/test_t041_evidence_vocabulary.py`.
+
+### Part 3 — the LLM/rule-based narrowing asymmetry
+
+`RuleBasedInterpreter` always re-parses the customer's own utterance
+against `session.pending_disambiguations` every turn and persists a
+NARROWED result via `oe._narrow_disambiguation` (its own
+`_resolve_clarification`). The LLM path only ever reached
+`_select_pending_candidate` from INSIDE `_authorize_item_creation` — i.e.
+only on a turn where the model happened to call `add_item`. A turn where
+the model just asks its own clarifying question (no tool call at all)
+left `pending_disambiguations` completely untouched. This is the exact
+mechanism behind the live gate's `NONPIZZA-006` flakiness (failed 1 of 3
+runs with an unnecessary `transfer_to_human`; passed the other 2 only
+because the model happened to issue an extra `search_menu` call that
+incidentally registered an already-narrowed set — reproduced and
+confirmed by re-reading the raw traces, not assumed).
+
+**Fixed with a new, explicit orchestration step —
+`_narrow_pending_disambiguations(session, text)` — called once per LLM-
+path turn in `_interpret_staged`, before the model's tool-dispatch loop,
+regardless of what the model does that turn.** It shares
+`_select_pending_candidate` with both `RuleBasedInterpreter` and
+`_authorize_item_creation` — the same one matcher, never a second copy —
+and, critically, it is NOT folded into `_authorize_item_creation` itself:
+narrowing `pending_disambiguations` is deliberately kept as a separate
+step from authorizing a cart mutation, so `_authorize_item_creation`
+stays exactly what Part 5 requires — pure, deterministic, no side
+effects, callable any number of times with the same result. Verified: it
+never selects or authorizes by itself (`test_narrowing_never_selects_or_
+authorizes_by_itself`) — only `_authorize_item_creation`, reached only
+through a real `add_item` tool call, can add anything to the cart.
+
+**On "one shared `authorize_cart_mutation()`" — no function by that name
+exists in this codebase, and forcing one would be the wrong fix.**
+`RuleBasedInterpreter` never calls `_authorize_item_creation` at all,
+because it doesn't need to: its own `add_item`/`add_modifier` calls are
+ALWAYS produced by its own `_has_pizza_intent`-gated parsing — there is no
+code path where `RuleBasedInterpreter` calls `add_item` with an item
+different from what its own deterministic parsing just decided, so the
+attack surface `_authorize_item_creation` exists to close (a model
+choosing ANY tool arguments it likes, independent of what it actually
+parsed) doesn't apply to it structurally. What IS genuinely shared, and
+verified not to have drifted, is every EVIDENCE PRIMITIVE both paths gate
+on: `_has_pizza_intent`, `_select_pending_candidate`,
+`_size_supported_by_utterance`, `oe.non_pizza_alias_hits`,
+`oe.normalize_menu_text`. Forcing `RuleBasedInterpreter` through a literal
+second function call it structurally doesn't need would be exactly the
+kind of change CLAUDE.md warns against — "features outside the active
+phase," a refactor for its own sake, on the single most safety-critical
+code path in the repository, the week after it was hardened.
+
+### Part 5 — the safety line, re-verified, not assumed
+
+- All three T-039B adversarial cases (customer says "I want a salad,"
+  model searches "wrap"/"coke"/gourmet #5 and tries to add it) still
+  refuse with `AUTH_UNSUPPORTED_ITEM_SUBSTITUTION`, cart untouched —
+  re-run directly, not inferred from the mechanism (`test_model_
+  controlled_unique_{wrap,coke,gourmet}_search_still_refused`).
+- `_AUTHORIZED_REASONS` still has exactly three members —
+  `AUTH_DIRECT_UTTERANCE_EVIDENCE`/`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`/
+  `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` — verified by direct set
+  equality (`test_exactly_three_authorized_reasons_exist`), not eyeballed
+  from a diff.
+- No path where a model-chosen query authorizes its own mutation: the
+  normalizer only canonicalizes WORD FORM (spelled number -> digit,
+  plural -> tolerated), it never adds new SEMANTIC evidence a model could
+  manufacture — `_search_query_supported_by_utterance` still requires
+  every identifying query token to independently appear in the customer's
+  own (equally normalized) words.
+- Reason codes stay trace-only: scanned all 3 live traces for the raw
+  code strings in any customer-facing reply — zero found (already
+  reported in the T-039 live-gate section; unaffected by this task, which
+  touches no reply-construction code).
+- `_authorize_item_creation` remains pure — no LLM calls, no cart writes;
+  `_narrow_pending_disambiguations` is the one narrow, deliberate
+  exception to "authorization never mutates," and it mutates only
+  clarification bookkeeping (`pending_disambiguations`), never the cart.
+
+### Consequences (T-041)
+
+- `lakewood/orders.py`: `WORD_TO_NUMBER`, `normalize_spoken_numbers`,
+  `normalize_menu_text` added; `_strip_search_filler` now calls
+  `normalize_menu_text` instead of a bare `_QTY_PIECE_RE.sub`; `raw_q` in
+  `search_menu` normalized once at intake; the CHEESE PIZZA pseudo-hit
+  regex and `_GENERIC_PIZZA_WORDS` gained plural tolerance;
+  `non_pizza_alias_hits`'s regex gained plural tolerance.
+- `lakewood/interpreter.py`: `_PIZZA_WORD_RE` gained plural tolerance;
+  new `_INTENSITY_WORD_RE` added to `_pizza_shorthand_residual`'s
+  consumption loop; `RuleBasedInterpreter.interpret` and
+  `_authorize_item_creation` both normalize their input text once, at
+  intake, via `oe.normalize_menu_text`; `_search_query_supported_by_
+  utterance` normalizes the model's own query internally; new
+  `_narrow_pending_disambiguations`, called once per turn in
+  `_interpret_staged`.
+- `tests/test_t041_evidence_vocabulary.py`: 22 new tests — the shared
+  normalizer's context-anchoring (including the "one half" regression
+  pin), `search_menu`'s four gaps proven directly, `_has_pizza_intent`'s
+  plural/intensity fixes (and that an unrelated noun still correctly
+  blocks), all four named gaps proven through `_authorize_item_creation`
+  itself, the full Part 5 safety-line re-verification (including an
+  in-process re-run of the entire T-039B adversarial suite), and the
+  Part 3 narrowing-symmetry fix end-to-end.
+- `evals/cases/t041_evidence_gaps.yaml`: 10 new cases — one regression
+  case per named gap (`QTY-PLURAL-001`, `INTENSITY-WORD-001`,
+  `GOURMET-CARDINAL-001`, `WINGS-QTY-WORD-001`) plus the six "voice
+  session noun" utterances from the original T-038 real-call P0
+  (`VOICE-CALZONE-001`, `VOICE-WRAP-CAESAR-001`, `VOICE-APPETIZER-001`,
+  `VOICE-SOUP-001`, `VOICE-TACOS-001`, `VOICE-GARLICBREAD-001`) that had
+  no live corpus coverage until this task.
+- `validate`: 91/91 (was 81/81 — pure corpus growth, no regressions).
+- Rule-based ratchet: 61/91 (was 50/81). +1 genuine flip (`GOURMET-013`,
+  "half number ten Hawaiian, half number eight BBQ chicken" — the
+  digit-only `_HH_BY_NUMBER_RE` half-by-number match now resolves once
+  `RuleBasedInterpreter.interpret`'s own text is normalized at intake) +
+  10 new cases, all passing as authored. Checked case-by-case, not
+  assumed: zero regressions against the prior 81-case fail list. Full
+  arithmetic: `tests/test_evals.py`'s baseline comment.
+- Pricing parity: 50/50, unchanged — no pricing/domain-layer change.
+- Full suite: 583 passed, 2 skipped, 2 xfailed (was 561 — 22 new tests,
+  zero regressions).
+- Live N=3 re-run and full arithmetic (rejection ratio, historical
+  overlap vs 40.33/54.33, silent-substitution recount): `docs/STATUS.md`'s
+  T-041 live-gate entry.
