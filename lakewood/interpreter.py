@@ -114,20 +114,124 @@ _NEW_PIZZA_TOPPING_VOCAB = [p for p in _TOPPING_VOCAB if p != "cheese"]
 # resolution now goes through oe.non_pizza_alias_hits — the one real alias
 # table and precedence rule search_menu itself uses — so this fast path can
 # never again drift out of sync with it.
-# Real, non-pizza menu-item nouns that must never be swallowed by a
-# co-occurring size/topping word into a fabricated pizza (T-039). "small" is
-# also a real GARDEN SALAD SM/SALAD SM size; CHICKEN/MOZZARELLA are real
-# ingredients on a calzone/wrap/salad too — none of that makes the utterance
-# a pizza order. Each word traces to a real oe.NON_PIZZA key; deliberately
-# excludes shared ingredient words (chicken, bacon, mozzarella) and generic
-# modifiers ("extra", "double") that legitimately appear on a real pizza
-# request too — this is a veto on ASSUMING pizza, not an attempt to resolve
-# the item itself (search_menu still does that, for real, in the fallback
-# this triggers).
-_NON_PIZZA_HEAD_WORDS = [
-    "salad", "calzone", "wrap", "grinder", "stromboli", "cheesecake",
-    "tiramisu", "hamburger", "cheeseburger", "burger", "dinner", "roll",
-]
+
+# T-039A: T-039's own fix (a `_NON_PIZZA_HEAD_WORDS` denylist of 12 literal
+# nouns) does not establish the general invariant — any product noun NOT on
+# that list ("nachos", "soup", "tacos", "appetizer", "garlic bread", or any
+# future menu item) still falls straight through to `_new_pizza`'s
+# unconditional default, because the denylist encodes "these known bad
+# words," never "positive evidence of pizza intent." Replaced entirely
+# (never expanded) by fail-closed intent parsing below — see ADR-017.
+
+# Ordinary connective/filler words that carry no product-identifying content
+# in a pizza-shorthand utterance. Deliberately narrow and reused nowhere else
+# a real ingredient/item word could hide — "please"/"can"/"i" etc. are never
+# menu-relevant, unlike a word this list must NOT include (any real topping,
+# size, or item name).
+_PIZZA_SHORTHAND_FILLER_RE = re.compile(
+    r"\b(a|an|the|and|with|please|i'd|id|like|get|want|order|of|only|"
+    r"just|some|me|can|i|for|on|that|this|side|other|actually|make|really|"
+    r"add|to|too)\b",
+    re.I)
+_QUANTITY_WORD_RE = re.compile(
+    r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+# "pie" is common colloquial slang for pizza ("a plain pie, medium") — as
+# strong an explicit-pizza signal as the word "pizza" itself, not a shorthand
+# grammar token to be balanced against a residual.
+_PIZZA_WORD_RE = re.compile(r"\bpizza\b|\bpie\b", re.I)
+
+
+def _pizza_shorthand_residual(t: str) -> str:
+    """What's left of an utterance after removing every token a tight pizza-
+    shorthand grammar recognizes: sizes, toppings (the FULL vocabulary,
+    including bare "cheese" — "small cheese" is a valid order even though
+    `_new_pizza`'s own topping-scavenging loop deliberately excludes bare
+    "cheese" for pricing purposes), half/portion phrasing, negation/lite
+    modifiers, quantities, and ordinary connective filler. An empty residual
+    means the utterance is FULLY explained as pizza shorthand — "large
+    pepperoni" and "small cheese" both clear this with no "pizza" word ever
+    said. A non-empty residual ("nachos", "soup", "garden salad" — none of
+    them a recognized pizza token) is positive evidence of something ELSE,
+    and pizza creation must not be assumed from it.
+    """
+    residual = t
+    for pattern in (_HALF_A_HALF_B_RE, _HH_BY_NUMBER_RE, _ONE_HALF_RE,
+                    _OTHER_HALF_RE, _BARE_HALF_RE, _NEGATION_RE, _LITE_RE,
+                    _QUANTITY_WORD_RE, _PIZZA_SHORTHAND_FILLER_RE):
+        residual = pattern.sub(" ", residual)
+    for phrase in _TOPPING_VOCAB:  # includes bare "cheese"; longest-first
+        residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
+    for phrase in _SIZE_VOCAB:
+        residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
+    # Clause punctuation (commas from "pepperoni, no onions") is not itself
+    # a product word — strip it before judging whether anything meaningful
+    # is left, or a bare leftover comma would wrongly count as "unexplained."
+    residual = re.sub(r"[^\w\s]", " ", residual)
+    return re.sub(r"\s+", " ", residual).strip()
+
+
+def _has_pizza_intent(text: str) -> bool:
+    """T-039A invariant: a request may create a pizza only when the
+    utterance provides positive, deterministic evidence the customer
+    intended a pizza — either the explicit word "pizza"/a recognized
+    gourmet pizza, or a fully-explained pizza-shorthand utterance (every
+    meaningful token is a size/topping/modifier/quantity/filler, nothing
+    left unaccounted for). Shared by BOTH interpreters' mutation boundary:
+    `RuleBasedInterpreter` gates `_new_pizza`/the bare-topping graft with it
+    directly; `LLMInterpreter` gates any model `add_item` call that would
+    create a pizza with the SAME function (see `_item_creation_is_authorized`
+    below) — one predicate, not two independently-drifting checks.
+    """
+    t = text.strip().lower()
+    if _PIZZA_WORD_RE.search(t):
+        return True
+    return _pizza_shorthand_residual(t) == ""
+
+
+def _item_creation_is_authorized(item_key: str, gourmet_number, second_gourmet_number,
+                                 text: str, search_hits: list[dict]) -> bool:
+    """T-039A Part 3: the LLM-path mutation boundary for `add_item` — covers
+    a substituted PIZZA just as much as a substituted valid NON_PIZZA SKU
+    (a model calling `add_item(item="CAN")` for "a small garden salad" is
+    the same defect class as substituting CHEESE PIZZA, just a different
+    valid item). Authorized only when the CUSTOMER's own utterance carries
+    positive evidence for THIS item, or the model is selecting a specific
+    candidate an authoritative `search_menu` call already returned THIS
+    turn — never on the model's/a heuristic's say-so alone.
+
+    Pizza (`item_key` is PIZZA/CHEESE PIZZA, or a gourmet number given):
+    evidence is `_has_pizza_intent` (the same predicate the rule-based path
+    is gated by) or a matching gourmet/CHEESE-PIZZA search hit this turn.
+
+    Any other (non-pizza) item: evidence is a real alias/name match in the
+    utterance for THAT SPECIFIC item (`oe.non_pizza_alias_hits` — the same
+    real, precedence-correct table `search_menu`/`_find_drink` use, not a
+    second guess) or a search hit this turn naming that exact item. This
+    intentionally does not invent a non-pizza equivalent of the pizza
+    shorthand grammar — a model unsure of a non-pizza item name should
+    search first, exactly as the system prompt already instructs.
+    """
+    creates_pizza = item_key in ("PIZZA", "CHEESE PIZZA") \
+        or gourmet_number is not None or second_gourmet_number is not None
+    if creates_pizza:
+        if _has_pizza_intent(text):
+            return True
+        for h in search_hits:
+            if h.get("kind") == "gourmet" and gourmet_number is not None \
+                    and h.get("number") == gourmet_number:
+                return True
+            if h.get("kind") == "item" and h.get("name") in ("PIZZA", "CHEESE PIZZA"):
+                return True
+        return False
+
+    if not item_key:
+        return True  # nothing to authorize against (BAD_ARGS handles this)
+    if any(canon == item_key for _, canon in oe.non_pizza_alias_hits(text.lower())):
+        return True
+    for h in search_hits:
+        if h.get("kind") == "item" and h.get("name") == item_key:
+            return True
+    return False
 
 _CONFIRM_RE = re.compile(
     r"\b(yes|yeah|yep|sure).{0,20}\b(place|confirm|go ahead)\b"
@@ -189,9 +293,9 @@ def _find_drink(text: str) -> Optional[str]:
 
 def _clean_query(t: str) -> str:
     """Strip conversational filler before handing text to search_menu — the
-    real menu lookup, never a guess. Shared by the plain fallback and the
-    non-pizza head-word veto below so there is one query-cleaning rule, not
-    two copies that could drift apart."""
+    real menu lookup, never a guess. Shared by every branch that falls back
+    to a real lookup (the plain fallback and the pizza-intent gate) so there
+    is one query-cleaning rule, not copies that could drift apart."""
     query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
     return re.sub(r"\s+", " ", query).strip() or t
 
@@ -254,34 +358,35 @@ class RuleBasedInterpreter:
         if m and size:
             return self._new_pizza_half_a_half_b(chat, size, m.group("a"), m.group("b"))
 
-        # 6.5. An utterance naming a real non-pizza item (T-039) overrides
-        # ANY co-occurring size/drink/topping word — "garden salad small"
-        # must never become a pizza just because "small" is also a pizza
-        # size, and "one calzone with mozzarella" must never graft
-        # "mozzarella" onto whatever pizza line already happens to be open.
-        # This check runs before, and therefore short-circuits, drink
-        # detection (7), new-pizza creation (8), and the bare-topping graft
-        # onto chat.last_line_id (9) — the three places T-039 found this
-        # exact defect, all from one missing check, not three separate ones.
-        # Route to a real menu lookup instead of guessing.
-        if _find_vocab(t, _NON_PIZZA_HEAD_WORDS):
-            return Interpretation(calls=[
-                ToolCall("search_menu", {"query": _clean_query(t)})])
-
         # 7. Generic drink mention.
         drink_key = _find_drink(t)
         if drink_key and not size:
             return Interpretation(calls=[ToolCall("add_item", {"item": drink_key})])
 
-        # 8. Size (+ optional toppings) — start a new pizza.
+        # 8. Size (+ optional toppings) — start a new pizza, but ONLY when
+        # the utterance carries positive, deterministic evidence of pizza
+        # intent (T-039A — replaces T-039's finite noun denylist, which
+        # could never cover an unlisted product noun like "nachos"/"soup").
+        # "small" is also a real GARDEN SALAD SM size; a size word alone is
+        # not evidence. Never guess: route to a real menu lookup instead.
         if size:
-            return self._new_pizza(chat, t, size)
+            if _has_pizza_intent(t):
+                return self._new_pizza(chat, t, size)
+            return Interpretation(calls=[
+                ToolCall("search_menu", {"query": _clean_query(t)})])
 
         # 9. Bare topping mention on an already-open pizza line — including
         # negation/lite said as its own follow-up turn ("no onions" after
-        # the pizza already exists), not just at creation time.
+        # the pizza already exists), not just at creation time. Same
+        # invariant: an utterance that also carries an unexplained product
+        # noun ("one calzone with mozzarella and ricotta") must never graft
+        # onto the open line just because it happens to contain a real
+        # topping word too — route to a real menu lookup instead.
         topping = _find_vocab(t, _TOPPING_VOCAB)
         if topping and chat.last_line_id:
+            if not _has_pizza_intent(t):
+                return Interpretation(calls=[
+                    ToolCall("search_menu", {"query": _clean_query(t)})])
             # Canonicalize BEFORE comparing against Topping.name (always
             # stored canonical/uppercase) — _find_vocab returns the raw
             # lowercase vocab phrase, which add_modifier alone would resolve
@@ -618,6 +723,14 @@ def _state_context(session: oe.Session) -> str:
     return "\n".join(parts)
 
 
+# T-039A Part 4: a provider/network failure or an internal tool-loop-
+# exhaustion diagnostic must never be spoken verbatim (see `interpret()`'s
+# except block below) — a stable, generic apology, with no interpolated
+# exception text. The real detail stays available via `last_provider_error`
+# for logs/traces.
+_PROVIDER_TROUBLE_REPLY = "Sorry, I'm having trouble right now — could you repeat that?"
+
+
 class LLMInterpreter:
     """Execute the shared tool contract against a staged in-memory session.
 
@@ -638,11 +751,16 @@ class LLMInterpreter:
         staged = copy.deepcopy(chat)
         staged.llm_history.append({"role": "user", "content": text})
         try:
-            result = self._interpret_staged(staged)
+            result = self._interpret_staged(staged, text)
         except ProviderCallError as e:
+            # T-039A Part 4: the exception text (network/HTTP detail, or the
+            # internal "tool loop exceeded N rounds" diagnostic below) is
+            # kept for logs/traces via last_provider_error, but must never be
+            # interpolated into what gets spoken — a customer hearing raw
+            # provider/internal diagnostic text is exactly the leak class
+            # this task closes.
             self.last_provider_error = str(e)
-            return Interpretation(
-                say=f"Sorry, I'm having trouble right now — could you repeat that? ({e})")
+            return Interpretation(say=_PROVIDER_TROUBLE_REPLY)
         # Keep the authoritative Session identity used by chat/eval callers.
         chat.session.__dict__.update(staged.session.__dict__)
         chat.last_line_id = staged.last_line_id
@@ -650,9 +768,10 @@ class LLMInterpreter:
         chat.llm_history = staged.llm_history
         return result
 
-    def _interpret_staged(self, chat: ChatState) -> Interpretation:
+    def _interpret_staged(self, chat: ChatState, text: str) -> Interpretation:
         executed = []
         last_new_line_id = None
+        search_hits_this_turn: list[dict] = []
         for _ in range(12):
             system = _SYSTEM_PROMPT + "\n\nCurrent order state:\n" + _state_context(chat.session)
             resp = self.provider.complete(system, chat.llm_history, _TOOL_SCHEMAS)
@@ -670,11 +789,29 @@ class LLMInterpreter:
                 schema = next((t["input_schema"] for t in _TOOL_SCHEMAS
                                if t["name"] == name), None)
                 if fn is None:
+                    # T-039A Part 4: the raw tool name a model invented is
+                    # diagnostic detail (kept in the structured result for
+                    # logs/traces), never customer dialogue — masked at the
+                    # single funnel, chat.py::_customer_safe_error_message.
                     r = {"status": "error", "code": "UNKNOWN_TOOL",
                          "message": f"{name!r} is not a real tool."}
                 elif not _valid_tool_args(args, schema, _MODEL_HIDDEN_ARGS.get(name, set())):
                     r = {"status": "error", "code": "BAD_ARGS",
                          "message": "Tool arguments do not match the permitted schema."}
+                elif name == "add_item" and not _item_creation_is_authorized(
+                        (args.get("item") or "").strip().upper(),
+                        args.get("gourmet_number"), args.get("second_gourmet_number"),
+                        text, search_hits_this_turn):
+                    # T-039A Part 3: the mutation boundary — a model calling
+                    # add_item for an item the customer's own utterance gives
+                    # no positive evidence for, and that isn't a candidate
+                    # this turn's own search_menu already returned, never
+                    # reaches the real tool. Same predicate that gates
+                    # RuleBasedInterpreter's _new_pizza; this is its LLM-path
+                    # enforcement point (see _item_creation_is_authorized).
+                    r = {"status": "error", "code": "UNSUPPORTED_ITEM_SUBSTITUTION",
+                         "message": "That doesn't match what was asked for — "
+                                    "could you clarify what you'd like?"}
                 else:
                     args = {k: v for k, v in args.items()
                             if k not in _MODEL_HIDDEN_ARGS.get(name, set())}
@@ -685,6 +822,10 @@ class LLMInterpreter:
                         r = (chat.tool_executor(name, args, fn, chat.session)
                              if chat.tool_executor is not None else fn(chat.session, **args))
                     except (TypeError, ValueError) as e:
+                        # T-039A Part 4: raw Python exception text (e.g. an
+                        # unexpected-keyword-argument message) is diagnostic
+                        # detail, not customer dialogue — same masked funnel
+                        # as UNKNOWN_TOOL above.
                         r = {"status": "error", "code": "BAD_ARGS", "message": str(e)}
 
                 executed.append({"tool": name, "args": args, "result": r})
@@ -693,6 +834,7 @@ class LLMInterpreter:
                     chat.last_line_id = last_new_line_id
                 if name == "search_menu" and r.get("status") == "ok":
                     chat.pending_clarification = r.get("results", [])
+                    search_hits_this_turn.extend(r.get("results", []))
                 tool_result_blocks.append({
                     "type": "tool_result", "tool_use_id": tu["id"],
                     "content": json.dumps(r, default=str),

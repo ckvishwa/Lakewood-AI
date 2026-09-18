@@ -46,12 +46,38 @@ CASES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # disambiguation, unrelated to this task's fix — so it fails, honestly, not
 # tuned to pass. 37 (prior baseline) + 4 = 41.
 #
+# Raised to 46/78 on 2026-09-17 (T-039A, reopening T-039). T-039's fix used
+# a finite `_NON_PIZZA_HEAD_WORDS` denylist (12 literal nouns) — replaced
+# entirely by fail-closed intent parsing (`_has_pizza_intent`, ADR-017
+# superseding section). Net effect on this gate, checked directly:
+#   +5 genuine flips (AVAIL-002, CORRECT-001, CORRECT-002, CORRECT-005,
+#     INVALID-003) — cases whose utterance has NO real pizza evidence and
+#     previously failed because the old code either wrongly created a pizza
+#     or (for the inverse shape) wrongly refused a legitimate one; the
+#     intent-gate resolves both directions correctly now.
+#   -4 corrected labels (ADV-002, ADV-004, COUPON-002, INVALID-002) — each
+#     previously asserted the OLD, permissive behavior (create the pizza
+#     regardless, silently skip an unrecognized topping/coupon mention
+#     riding along with it). Per the task's own invariant ("if unexplained
+#     product words remain... do not mutate the cart"), a real unresolved
+#     word (truffle, a fabricated coupon description) now correctly blocks
+#     pizza creation instead of being silently dropped — the SAME defect
+#     class this task closes, just embedded in the compound-utterance shape
+#     rather than a bare unknown noun. Relabeled with full justification in
+#     each case file, not tuned to pass; see ADR-017's "Consequences".
+# 41 (T-039 baseline) + 5 flips - 4 relabeled = 42, but two further real
+# code gaps were found and fixed while investigating those flips (adding
+# "add"/"to"/"too" to the pizza-shorthand filler set for legitimate
+# follow-up phrasing like "add pepperoni too", and recognizing "pie" as
+# pizza-word evidence for "a plain pie, medium") which recovered MOD-014,
+# CONFIRM-002, and SLANG-002 — net 46/78.
+#
 # Raise this number ONLY after running the real command and confirming the
 # new count:
 #     python evals/runner.py score --adapter rule_based
 # Never lower it, and never raise it to a number you haven't actually
 # observed — either of those defeats the entire point of this gate.
-RULE_BASED_BASELINE = 41
+RULE_BASED_BASELINE = 46
 
 
 def test_all_golden_labels_are_valid():

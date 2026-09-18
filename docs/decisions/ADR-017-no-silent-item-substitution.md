@@ -1,6 +1,14 @@
 # ADR-017 — An unresolved item must never silently become a different item
 
-**Status:** Accepted · 2026-09-17
+**Status:** Accepted · 2026-09-17. **Amended 2026-09-17 (T-039A, same day,
+reopened).** The invariant this ADR establishes is unchanged; the
+enforcement mechanism described in the original "Decision" section below
+(`_NON_PIZZA_HEAD_WORDS`, a 12-word denylist) has been REPLACED, not
+extended, by fail-closed intent parsing. See "Amendment: fail-closed intent
+parsing replaces the denylist (T-039A)" after "Consequences" for the
+current mechanism — read that section for what the code actually does
+today; the original "Decision" section is kept for historical diagnosis
+context only and is marked accordingly.
 
 ## Context
 
@@ -90,7 +98,7 @@ cases ordered a non-pizza item at all (salad/calzone/wrap/appetizer) — the
 exact class of order this defect hits. Ten turns of real speech found a P0
 that number of synthetic cases never could.
 
-## Decision
+## Decision (superseded 2026-09-17 by the T-039A amendment below — kept as historical record of the original mechanism)
 
 **An utterance naming an item the system cannot resolve must never silently
 become a different item. Refuse or clarify. Never substitute.**
@@ -198,3 +206,131 @@ reintroduce, not just fixed once more.
   tuned to pass).
 - Pricing parity: 50/50, unchanged — no pricing/domain-layer change.
 - No change to `LLMInterpreter`, `orders.py`'s FSM, or any pricing logic.
+
+## Amendment: fail-closed intent parsing replaces the denylist (T-039A)
+
+**T-039 was closed with `_NON_PIZZA_HEAD_WORDS`, a 12-word denylist
+(`salad`, `calzone`, `wrap`, `grinder`, `stromboli`, `cheesecake`,
+`tiramisu`, `hamburger`, `cheeseburger`, `burger`, `dinner`, `roll`). That
+does not establish the invariant this ADR claims — it only special-cases 12
+specific nouns.** Any product noun NOT on that list still fell straight
+through to `_new_pizza`'s unconditional default. Confirmed directly, same
+day, on the commit that closed T-039 (`765fe1f`):
+
+| Customer said | System added |
+|---|---|
+| "A medium nachos with chicken." | medium cheese pizza — chicken — $16.00 |
+| "A small appetizer with chicken." | small cheese pizza — chicken — $13.50 |
+| "A large soup with bacon." | large cheese pizza — bacon — $18.00 |
+| "A medium tacos with onions." | medium cheese pizza — onions — $15.50 |
+| "A small garlic bread with chicken." | small cheese pizza — chicken — $13.50 |
+
+None of these five nouns was ever on the denylist — the mechanism was
+structurally incapable of generalizing, by construction, regardless of list
+length.
+
+### Decision (current)
+
+**A pizza may be created only when the utterance provides positive,
+deterministic evidence of pizza intent** — never on the absence of a
+recognized non-pizza noun.
+
+`lakewood/interpreter.py`:
+
+- `_has_pizza_intent(text)`: true when either (a) the literal word "pizza"
+  or its common slang "pie" appears, or (b) `_pizza_shorthand_residual(text)`
+  is empty — every meaningful token in the utterance is consumed by a real
+  size, topping (the FULL vocabulary, including bare "cheese" — "small
+  cheese" is a valid order), half/portion phrasing, negation/lite modifier,
+  quantity word, or a narrow, curated set of ordinary connective filler
+  (articles, "and"/"with", "please", "add"/"to"/"too", etc. — never a real
+  menu word). A non-empty residual ("nachos", "soup", "garden salad" — none
+  of them a recognized token) is positive evidence of something else, and
+  blocks pizza creation. This subsumes the old denylist with no enumeration
+  at all: the 12 words it covered are simply never consumable by the
+  residual, the same as any other unlisted noun.
+- `_new_pizza`'s trigger (any size word) and the bare-topping graft onto an
+  already-open line are both now gated by `_has_pizza_intent` — the SAME
+  predicate, not two copies. Topping scavenging (`_new_pizza`'s own clause
+  loop) only ever runs after this gate passes, satisfying the task's own
+  requirement that scavenging happen only once pizza intent is established.
+- **LLM-path mutation boundary** (`_item_creation_is_authorized`, in
+  `LLMInterpreter._interpret_staged`'s tool-dispatch loop): generalizes past
+  pizza. A model's `add_item` call — for a pizza OR a valid non-pizza SKU —
+  is authorized only when `_has_pizza_intent` holds for a pizza-creating
+  call, or (for any item) the model is selecting a specific candidate an
+  authoritative `search_menu` call already returned THIS turn, or (for a
+  non-pizza item, e.g. a drink) `oe.non_pizza_alias_hits` finds real textual
+  evidence for that specific item. Proven both directions: the original
+  T-039 LLM test only ever scripted a fabricated *unknown* SKU
+  (`"garden salad"`), which trivially failed `add_item`'s own
+  `ITEM_NOT_FOUND` check — false confidence, since a model substituting a
+  *valid* SKU (`CHEESE PIZZA`, or a different valid item like `CAN`) for an
+  unresolved request was never blocked by anything but the system prompt.
+  Both shapes are now rejected before the real tool ever runs, while a
+  direct pizza order with no prior `search_menu` call, and a real
+  `search_menu` → gourmet-selection flow, both still work unchanged.
+- **Customer-safe failures extended** (Part 4, same task): unknown tool
+  names (both interpreters' mutation loops), raw Python exception text from
+  a caught `TypeError`/`ValueError`, provider-call failures, and the
+  internal "tool loop exceeded N rounds; turn discarded" diagnostic are all
+  masked to a stable, generic apology at the shared funnel
+  (`chat.py::_customer_safe_error_message`, mask set extended from
+  `{BAD_LINE, NOT_ON_PIZZA}` to include `UNKNOWN_TOOL`/`BAD_ARGS`) or, for
+  the LLM provider-exception path, by no longer interpolating the exception
+  into `say=`. Diagnostic detail remains available via
+  `last_provider_error`/`made`/traces for logs.
+
+### Known, accepted tradeoff
+
+An utterance combining a clear pizza base with ONE unresolvable modifier or
+unrelated clause ("I know you have a truffle topping, just put it on my
+medium cheese"; "large cheese, and apply the half off everything code") now
+refuses the WHOLE utterance rather than creating the pizza and separately
+failing the unresolvable part. The old, more permissive behavior was
+arguably more convenient for a genuinely confused customer in that specific
+shape; it is also the exact reasoning ("a recognized topping word is
+present, so it's pizza") that made the original defect possible, and cannot
+be special-cased back in without reopening it. Four pre-existing corpus
+labels (`ADV-002`, `ADV-004`, `COUPON-002`, `INVALID-002`) asserted the old
+behavior and were corrected to the new one, each with its own comment
+explaining why.
+
+### Consequences (T-039A)
+
+- `lakewood/interpreter.py`: `_NON_PIZZA_HEAD_WORDS` deleted entirely (not
+  deprecated in place); `_has_pizza_intent`/`_pizza_shorthand_residual`/
+  `_item_creation_is_authorized` added.
+- `lakewood/chat.py`: `_INTERNAL_ID_ERROR_CODES`/`_INTERNAL_ID_FALLBACK`
+  renamed and broadened to `_INTERNAL_DETAIL_ERROR_CODES` (now 4 codes)/
+  `_CUSTOMER_SAFE_FALLBACK`; the rule-based executor's unknown-tool path no
+  longer builds a raw `f"(internal error: ...)"` string.
+- `tests/test_item_substitution_guard_generalized.py`: 25 new tests — the
+  five original T-039 rows re-asserted against the new mechanism, the five
+  new adversarial phrases (verified to fail on `765fe1f`), an arbitrary
+  unseen noun, all four required valid-shorthand orders, both LLM
+  substitution shapes (pizza and non-pizza SKU), both legitimate LLM flows
+  (direct order, search-then-select), five Part 4 safe-failure proofs, and
+  the voice-loop-survives-unusable-audio proof.
+- Two real, narrow code gaps found and fixed while investigating corpus
+  flips (not scope creep — both are direct requirements of the same
+  intent-parsing mechanism): "add"/"to"/"too" added to the pizza-shorthand
+  filler set (natural follow-up phrasing like "add pepperoni too"/"actually
+  take the mushrooms off" was being wrongly blocked without them); "pie"
+  recognized as pizza-word evidence alongside "pizza" itself ("a plain pie,
+  medium").
+- `evals/cases/adversarial.yaml`, `store_info_and_coupons.yaml`,
+  `invalid_and_ambiguous.yaml`: `ADV-002`, `ADV-004`, `COUPON-002`,
+  `INVALID-002` relabeled to the new correct behavior (see "Known, accepted
+  tradeoff" above), each with an explanatory comment.
+- `validate`: 78/78, unchanged (label growth only, no new cases this task).
+- Rule-based ratchet: 46/78 (was 41/78 from T-039). +5 genuine flips
+  (`AVAIL-002`, `CORRECT-001`, `CORRECT-002`, `CORRECT-005`, `INVALID-003`)
+  from the more accurate intent gate; −4 from the 4 relabeled adversarial
+  cases; +3 recovered (`MOD-014`, `CONFIRM-002`, `SLANG-002`) by the two
+  filler/pie fixes above that the flip investigation surfaced. Full
+  arithmetic and evidence: `tests/test_evals.py`'s own baseline comment.
+- Pricing parity: 50/50, unchanged.
+- No change to `orders.py`'s FSM or any pricing logic; `orders.py` gained
+  no new code this task (only the T-039 `non_pizza_alias_hits` promotion,
+  already in place before T-039A started).

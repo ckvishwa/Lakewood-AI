@@ -268,19 +268,27 @@ def _build_batched_clarification(pending: list[dict]) -> str:
     return "Also, " + "; and ".join(parts) + "?"
 
 
-# T-039 Part 3: a domain error's `message` is sometimes built from a raw
-# internal identifier (a line_id like "L5") that means nothing to a customer
-# and must never be spoken verbatim — a real live call had the assistant say
-# "L5 is not a pizza." Grep-verified against every err() call site in
-# orders.py: these two codes are the only ones whose message embeds a raw
-# line_id; every other code's message is written to be customer-safe as-is.
-_INTERNAL_ID_ERROR_CODES = {"BAD_LINE", "NOT_ON_PIZZA"}
-_INTERNAL_ID_FALLBACK = "Sorry, I couldn't apply that to your order — could you say that again?"
+# T-039 Part 3 / T-039A Part 4: a structured error's `message` is sometimes
+# built from a raw internal identifier or diagnostic text that means nothing
+# to a customer and must never be spoken verbatim:
+#   - BAD_LINE / NOT_ON_PIZZA — a raw line_id (a real live call had the
+#     assistant say "L5 is not a pizza."). Grep-verified against every
+#     err() call site in orders.py: these two codes are the only DOMAIN
+#     codes whose message embeds one.
+#   - UNKNOWN_TOOL — LLMInterpreter's own structured error for a tool name
+#     the model invented (e.g. `'debug_admin_tool' is not a real tool.`).
+#   - BAD_ARGS — either a generic, already-safe schema-mismatch message, or
+#     (from the except (TypeError, ValueError) branch) a raw Python
+#     exception string. Masked uniformly rather than trying to tell the two
+#     shapes apart — the safe-wording case loses nothing customer-relevant.
+# Every other code's message is written to be customer-safe as-is.
+_INTERNAL_DETAIL_ERROR_CODES = {"BAD_LINE", "NOT_ON_PIZZA", "UNKNOWN_TOOL", "BAD_ARGS"}
+_CUSTOMER_SAFE_FALLBACK = "Sorry, I couldn't do that — could you try again?"
 
 
 def _customer_safe_error_message(r: dict) -> str:
-    if r.get("code") in _INTERNAL_ID_ERROR_CODES:
-        return _INTERNAL_ID_FALLBACK
+    if r.get("code") in _INTERNAL_DETAIL_ERROR_CODES:
+        return _CUSTOMER_SAFE_FALLBACK
     return r.get("message", "Sorry, that didn't work.")
 
 
@@ -408,8 +416,15 @@ def run_turn(chat: ChatState, interpreter: TextInterpreter, text: str,
         args = substitute_last_line(call.args, last_new_line_id)
         fn = TOOLS.get(call.tool)
         if fn is None:
-            return _apply_completion_guard(chat, TurnResult(
-                f"(internal error: interpreter named an unknown tool {call.tool!r})", made))
+            # T-039A Part 4: the offending tool name is real diagnostic
+            # detail (kept in `made`/traces for logs), never customer
+            # dialogue — a raw "(internal error: ...)" string previously
+            # reached the customer verbatim.
+            made.append({"tool": call.tool, "args": args,
+                        "result": {"status": "error", "code": "UNKNOWN_TOOL",
+                                   "message": f"{call.tool!r} is not a real tool."}})
+            return _apply_completion_guard(
+                chat, TurnResult(_customer_safe_error_message(made[-1]["result"]), made))
         if chat.tool_executor is not None:
             r = chat.tool_executor(call.tool, args, fn, chat.session)
         elif call.tool == "confirm_order" and repository is not None:

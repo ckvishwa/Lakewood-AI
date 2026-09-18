@@ -619,6 +619,24 @@ transferred/corrected call becomes a case no one had to imagine in advance —
 exactly the corpus-flywheel step below, now with a concrete example of what
 it catches that hand-authoring structurally cannot.
 
+**Correction — T-039A, same day, reopened T-039.** The fix described above
+shipped as a 12-word denylist (`_NON_PIZZA_HEAD_WORDS`). That does not
+generalize: any product noun NOT on the list ("nachos", "soup", "tacos",
+"appetizer", "garlic bread") still silently became a priced pizza,
+confirmed directly on the commit that closed T-039. The corpus's own blind
+spot compounds this exactly as described above — a denylist is itself
+"what the author thought to write," the same structural ceiling as the
+corpus that missed the original bug. T-039A replaced the denylist with
+fail-closed intent parsing (a pizza needs POSITIVE evidence, not merely the
+absence of a known-bad word) and generalized the LLM-path guard to cover a
+model substituting a valid non-pizza SKU, not just a fabricated one. Full
+mechanism: ADR-017's "Amendment" section. `evals/cases/non_pizza_items.yaml`
+stays as-is (5 cases); this task corrected 4 pre-existing adversarial
+labels (`ADV-002`, `ADV-004`, `COUPON-002`, `INVALID-002`) that had
+asserted the old, permissive behavior for a compound utterance (a clear
+pizza base plus one unresolvable modifier/clause) — see ADR-017's "Known,
+accepted tradeoff" for the honest cost of that correction.
+
 ## Release gate
 
 **This is the future production-model gate (PLANNED — no real `score

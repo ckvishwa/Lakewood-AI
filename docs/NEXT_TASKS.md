@@ -2,26 +2,31 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
-**T-039 is DONE (2026-09-17)** — closed a P0: `RuleBasedInterpreter` was
-silently substituting a different, real, priced item for one it couldn't
-resolve (a garden salad became a small cheese pizza; "a two liter coke"
-became a can), found by a real 10-turn T-038 Phase 2 voice session. Fix: a
-shared non-pizza-head-word veto in `interpreter.py`, plus promoting
-`orders.py`'s real `NON_PIZZA_ALIASES` precedence logic
-(`oe.non_pizza_alias_hits`) so `RuleBasedInterpreter` and `search_menu` share
-one table instead of two that silently drift apart. Also fixed: an internal
-line_id reaching the customer verbatim (`chat.py::_customer_safe_error_message`)
-and an unusable recording crashing the whole voice-loop process
-(`voice.py::turn()` now degrades gracefully). 16 new regression tests (one
-per real transcript row, verified to fail pre-fix), 5 new
-`evals/cases/non_pizza_items.yaml` cases — the corpus's first non-pizza item
-orders. Full reasoning: `docs/decisions/ADR-017-no-silent-item-substitution.md`.
-`validate` 78/78, rule-based ratchet 41/78 (real, observed growth — see
-STATUS.md "T-039 done" for the honest per-case breakdown), pricing parity
-50/50. **Live N=3 BLOCKED** — no `EXPLABS_API_KEY` in this environment;
-owner action needed. Recommended next task: **T-038 Phase 2's remaining
-item** below (real hardware voice loop) — explicitly paused for this task,
-now unblocked.
+**T-039A is DONE (2026-09-17)** — reopened T-039 the same day: T-039's fix
+(`_NON_PIZZA_HEAD_WORDS`, a 12-word denylist) did not establish the general
+"never substitute" invariant it claimed. Confirmed directly on the commit
+that closed T-039: "A medium nachos with chicken." (and four more
+adversarial nouns) still produced a fabricated, priced pizza — any noun not
+on the list fell through unchanged. Replaced the denylist entirely with
+fail-closed intent parsing (`_has_pizza_intent`/`_pizza_shorthand_residual`
+in `interpreter.py` — a pizza needs POSITIVE evidence, never merely the
+absence of a known-bad word) and generalized the LLM-path mutation-boundary
+guard (`_item_creation_is_authorized`) to reject a model substituting a
+VALID SKU — pizza or another valid non-pizza item — not just a fabricated
+unknown one (T-039's own LLM test only ever exercised the latter, false
+confidence). Also extended Part 4 customer-safe-failure masking to unknown
+tool names, raw exception text, provider failures, and tool-loop
+exhaustion. Full reasoning, known tradeoff, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s "Amendment"
+section. 26 new tests (`tests/test_item_substitution_guard_generalized.py`),
+4 pre-existing corpus labels corrected (asserted the old, permissive
+compound-utterance behavior). `validate` 78/78 unchanged, rule-based
+ratchet 46/78 (was 41/78 — real, observed growth, honest per-flip
+breakdown in `tests/test_evals.py`'s baseline comment), pricing parity
+50/50. **Live N=3 still BLOCKED** — no `EXPLABS_API_KEY` in this
+environment; owner action needed. Recommended next task: **T-038 Phase 2's
+remaining item** below (real hardware voice loop) — unblocked again now
+that this P0 is genuinely closed.
 
 **T-040 · `search_menu`'s single-hit reply always asks "What size would you
 like?", even for a topping or non-pizza item hit** — **Priority:** 3 ·
