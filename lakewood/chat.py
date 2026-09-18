@@ -23,6 +23,7 @@ provider.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -202,7 +203,31 @@ class PersistentChat:
         # Functions are immutable under deepcopy; unlike a bound method, this
         # closure retains the live application/repository when LLMInterpreter
         # deep-copies ChatState for its staged protocol.
-        return ChatState(session, tool_executor=lambda name, args, fn, staged: self._executor(name, args, fn, staged))
+        pending = (list(session.pending_disambiguations[-1]["candidates"])
+                   if session.pending_disambiguations else None)
+        return ChatState(
+            session,
+            pending_clarification=pending,
+            tool_executor=lambda name, args, fn, staged: self._executor(name, args, fn, staged),
+        )
+
+    @staticmethod
+    def _clarification_fingerprint(session: oe.Session) -> str:
+        """Stable snapshot of authoritative clarification state only.
+
+        A nominally read-only lookup should not force a repository write when
+        it changed nothing.  Conversely, search_menu misses/ambiguities and
+        deterministic candidate narrowing are real state mutations and must
+        survive a dropped call.
+        """
+        return json.dumps({
+            "unresolved_lookups": session.unresolved_lookups,
+            "pending_disambiguations": [
+                {"query": e["query"], "candidates": e["candidates"],
+                 "key": sorted(e["key"]), "ask_count": e["ask_count"]}
+                for e in session.pending_disambiguations
+            ],
+        }, sort_keys=True)
 
     @classmethod
     def start(cls, repo: SessionRepository, inbound_did: str, call_id: str,
@@ -232,7 +257,12 @@ class PersistentChat:
     def run_turn(self, interpreter: TextInterpreter, text: str, debug: bool = False) -> "TurnResult":
         if self.chat is None:
             raise RuntimeError("resume must be accepted or declined before a customer turn")
-        return run_turn(self.chat, interpreter, text, debug=debug)
+        before = self._clarification_fingerprint(self.chat.session)
+        result = run_turn(self.chat, interpreter, text, debug=debug)
+        after = self._clarification_fingerprint(self.chat.session)
+        if after != before:
+            save_progress(self.repo, self.chat.session)
+        return result
 
 
 def _format_hit_name(h: dict) -> str:
@@ -266,6 +296,30 @@ def _build_batched_clarification(pending: list[dict]) -> str:
     if len(parts) == 1:
         return parts[0][0].upper() + parts[0][1:] + "?"
     return "Also, " + "; and ".join(parts) + "?"
+
+
+# T-039 Part 3 / T-039A Part 4: a structured error's `message` is sometimes
+# built from a raw internal identifier or diagnostic text that means nothing
+# to a customer and must never be spoken verbatim:
+#   - BAD_LINE / NOT_ON_PIZZA — a raw line_id (a real live call had the
+#     assistant say "L5 is not a pizza."). Grep-verified against every
+#     err() call site in orders.py: these two codes are the only DOMAIN
+#     codes whose message embeds one.
+#   - UNKNOWN_TOOL — LLMInterpreter's own structured error for a tool name
+#     the model invented (e.g. `'debug_admin_tool' is not a real tool.`).
+#   - BAD_ARGS — either a generic, already-safe schema-mismatch message, or
+#     (from the except (TypeError, ValueError) branch) a raw Python
+#     exception string. Masked uniformly rather than trying to tell the two
+#     shapes apart — the safe-wording case loses nothing customer-relevant.
+# Every other code's message is written to be customer-safe as-is.
+_INTERNAL_DETAIL_ERROR_CODES = {"BAD_LINE", "NOT_ON_PIZZA", "UNKNOWN_TOOL", "BAD_ARGS"}
+_CUSTOMER_SAFE_FALLBACK = "Sorry, I couldn't do that — could you try again?"
+
+
+def _customer_safe_error_message(r: dict) -> str:
+    if r.get("code") in _INTERNAL_DETAIL_ERROR_CODES:
+        return _CUSTOMER_SAFE_FALLBACK
+    return r.get("message", "Sorry, that didn't work.")
 
 
 def _reply_for(tool: str, r: dict) -> str:
@@ -358,7 +412,7 @@ def _finish_turn(chat: ChatState, made: list, debug: bool) -> TurnResult:
         return _apply_completion_guard(chat, TurnResult(_reply_for_search_menu(chat, r), made))
     if r.get("status") == "error":
         return _apply_completion_guard(
-            chat, TurnResult(r.get("message", "Sorry, that didn't work."), made))
+            chat, TurnResult(_customer_safe_error_message(r), made))
     return _apply_completion_guard(chat, TurnResult(_reply_for(tool, r), made))
 
 
@@ -392,8 +446,15 @@ def run_turn(chat: ChatState, interpreter: TextInterpreter, text: str,
         args = substitute_last_line(call.args, last_new_line_id)
         fn = TOOLS.get(call.tool)
         if fn is None:
-            return _apply_completion_guard(chat, TurnResult(
-                f"(internal error: interpreter named an unknown tool {call.tool!r})", made))
+            # T-039A Part 4: the offending tool name is real diagnostic
+            # detail (kept in `made`/traces for logs), never customer
+            # dialogue — a raw "(internal error: ...)" string previously
+            # reached the customer verbatim.
+            made.append({"tool": call.tool, "args": args,
+                        "result": {"status": "error", "code": "UNKNOWN_TOOL",
+                                   "message": f"{call.tool!r} is not a real tool."}})
+            return _apply_completion_guard(
+                chat, TurnResult(_customer_safe_error_message(made[-1]["result"]), made))
         if chat.tool_executor is not None:
             r = chat.tool_executor(call.tool, args, fn, chat.session)
         elif call.tool == "confirm_order" and repository is not None:
@@ -409,6 +470,11 @@ def run_turn(chat: ChatState, interpreter: TextInterpreter, text: str,
             chat.last_line_id = last_new_line_id
         if r.get("status") == "error" or (call.tool == "search_menu" and r.get("status") == "ok"):
             break  # let _finish_turn build the clarification/refusal reply
+        if call.tool in {"add_item", "add_modifier", "decline_item"} \
+                and r.get("status") == "ok":
+            chat.pending_clarification = (
+                list(chat.session.pending_disambiguations[-1]["candidates"])
+                if chat.session.pending_disambiguations else None)
 
     return _finish_turn(chat, made, debug)
 

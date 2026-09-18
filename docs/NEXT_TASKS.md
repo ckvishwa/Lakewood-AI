@@ -2,6 +2,133 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+**T-041 is DONE (2026-09-18)** — the mutation-boundary guard's evidence
+check had grown a SECOND retrieval/matching system, independently of
+`search_menu`, with none of its normalization. Part 1 (done before any
+patch): checked directly whether `search_menu` had the identical gaps
+rather than assuming the evidence check was uniquely broken — it did
+(`search_menu(sess, "number ten")`/`"six piece wings"`/`"large pizzas"`/
+`"sodas"` all returned `NO_MATCH`, live, before this task). Unified with
+one shared normalizer in `orders.py` (`normalize_spoken_numbers`/
+`normalize_menu_text`), consumed by both `search_menu` and the
+interpreter's evidence layer, closing all four named gaps (plural
+"pizzas", "triple"/"double"/"extra"/"quadruple" intensity words, spelled
+gourmet cardinals, spelled quantity-to-abbreviated-SKU matching) at the
+root rather than as four independent patches. Also fixed the LLM/rule-
+based narrowing asymmetry (`_narrow_pending_disambiguations`, closing the
+`NONPIZZA-006` flakiness) while keeping `_authorize_item_creation` pure —
+no shared mutation, no fourth authorized reason, all three T-039B
+adversarial cases still refuse (re-verified directly). A first version of
+the normalizer converted every standalone spelled number and broke `_ONE_
+HALF_RE`'s "on one half" idiom — caught by the full suite, fixed by
+anchoring conversion to number-reference/piece-count context only, never
+a bare word. Live N=3 re-run: **zero silent substitutions, zero
+authorization bypasses, rejection ratio inverted (evidence now exceeds
+refusal) in every run** — historical-overlap mean recovered from 40.33 to
+47.0 (T-032's pre-guard band: 54.33; residual gap is unrelated model-
+capability categories, not authorization). A label-authoring mistake in
+3 of this task's own new corpus cases was found and corrected post-gate
+(ratchet: 58/91, not the mislabeled 61/91). Full mechanism, live-gate
+data, and every consequence: `docs/decisions/ADR-017-no-silent-item-
+substitution.md`'s T-041 amendment; `docs/EVALS.md`'s T-041 live-gate
+section. **T-038 Phase 2 is unblocked** — recommended next task below.
+
+**T-042 · "Extra X" on a half-portion modifier is interpreted as
+`intensity=DOUBLE`, not a plain addition (found by T-041's live N=3
+gate)** — **Priority:** 7 (model-accuracy, not correctness/safety) ·
+**Status:** Not started. `GOURMET-010`'s real live-model behavior
+("medium number ten, extra pepperoni just on one half") authorizes and
+adds the item correctly but consistently prices it $24.00 instead of the
+label's $21.50, because the model sets `add_modifier(intensity=DOUBLE)`
+for "extra pepperoni" rather than a plain `NORMAL`-intensity addition.
+Not a substitution, not an authorization-boundary issue, not new — a
+modifier-intensity SEMANTICS question (does "extra X" mean "add X" or
+"double X"?) unrelated to item-creation authorization. Reproduced
+identically in all 3 of T-041's live runs. Scope: decide the correct
+domain semantics for "extra" (likely: `NORMAL`, distinct from `DOUBLE`,
+which should require an explicit "double"), then decide whether to fix via
+prompt/tool-description clarification (cheapest) or a rule-based
+text-to-intensity extractor generalization (also closes `MOD-020`/
+`GOURMET-005`'s own honest DOUBLE-intensity `RuleBasedInterpreter`
+misses, a related but separate pre-existing gap). Full evidence:
+`docs/EVALS.md`'s T-041 live-gate section.
+
+**T-039B is DONE (2026-09-18)** — T-039A's LLM-path guard
+(`_item_creation_is_authorized`) treated any `search_menu` hit returned
+this turn as authorization, even one returned under
+`needs_disambiguation=True` and even when the model's own search query had
+no support in the customer's utterance — reproduced directly: "I want a
+salad" → model searches "wrap"/"coke"/a gourmet number → adds that
+unrelated valid SKU, authorized. Replaced with `_authorize_item_creation`,
+which returns a reason code (`AUTH_DIRECT_UTTERANCE_EVIDENCE`/
+`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`/`AUTH_CUSTOMER_CONFIRMED_PENDING_
+CANDIDATE` authorize; `AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED`/
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` do not) and requires both the search
+query and the exact retrieved SKU to be independently supported by the
+customer's own words, never the model's say-so. Added deterministic
+explicit-follow-up resolution against the server-owned
+`session.pending_disambiguations` set (`_select_pending_candidate`, shared
+by both interpreters — resolves "the large garden salad" directly, and
+narrows a family like "the garden one" before a later bare "large"
+resolves it). Also fixed a persistence gap found while building this:
+`search_menu` was treated as read-only, but registering/narrowing/clearing
+`pending_disambiguations` is a real mutation of authoritative clarification
+state that was never saved — `PersistentChat.run_turn` now fingerprints
+that state before/after the turn and saves only when it actually changed.
+Full reasoning and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+15 new tests (`tests/test_t039b_candidate_authorization.py`), 3 new corpus
+cases (`evals/cases/non_pizza_items.yaml`: NONPIZZA-006/007/008).
+`validate` 81/81 (was 78/78), rule-based ratchet 50/81 (was 46/78 — +1
+genuine flip, +3 new cases passing as authored; honest breakdown in
+`tests/test_evals.py`'s baseline comment), pricing parity 50/50 unchanged,
+full suite 561/2/2 (was 546/2/2, zero regressions). **Live N=3 ran
+2026-09-18 — zero silent substitutions, zero authorization bypasses;
+historical-overlap score dropped to 41/39/41 vs T-032's 53/54/56, root-
+caused to evidence-vocabulary gaps, fixed the same day by T-041 above
+(historical-overlap mean recovered to 47.0).** Fully superseded by T-041's
+entry above.
+
+**T-039A is DONE (2026-09-17)** — reopened T-039 the same day: T-039's fix
+(`_NON_PIZZA_HEAD_WORDS`, a 12-word denylist) did not establish the general
+"never substitute" invariant it claimed. Confirmed directly on the commit
+that closed T-039: "A medium nachos with chicken." (and four more
+adversarial nouns) still produced a fabricated, priced pizza — any noun not
+on the list fell through unchanged. Replaced the denylist entirely with
+fail-closed intent parsing (`_has_pizza_intent`/`_pizza_shorthand_residual`
+in `interpreter.py` — a pizza needs POSITIVE evidence, never merely the
+absence of a known-bad word) and generalized the LLM-path mutation-boundary
+guard (`_item_creation_is_authorized`) to reject a model substituting a
+VALID SKU — pizza or another valid non-pizza item — not just a fabricated
+unknown one (T-039's own LLM test only ever exercised the latter, false
+confidence). Also extended Part 4 customer-safe-failure masking to unknown
+tool names, raw exception text, provider failures, and tool-loop
+exhaustion. Full reasoning, known tradeoff, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s "Amendment"
+section. 26 new tests (`tests/test_item_substitution_guard_generalized.py`),
+4 pre-existing corpus labels corrected (asserted the old, permissive
+compound-utterance behavior). `validate` 78/78 unchanged, rule-based
+ratchet 46/78 (was 41/78 — real, observed growth, honest per-flip
+breakdown in `tests/test_evals.py`'s baseline comment), pricing parity
+50/50. **Live N=3 still BLOCKED** — no `EXPLABS_API_KEY` in this
+environment; owner action needed. Recommended next task: **T-038 Phase 2's
+remaining item** below (real hardware voice loop) — unblocked again now
+that this P0 is genuinely closed.
+
+**T-040 · `search_menu`'s single-hit reply always asks "What size would you
+like?", even for a topping or non-pizza item hit** — **Priority:** 3 ·
+**Status:** Not started. Found while verifying T-039: a `search_menu` hit
+of kind `topping` or `item` (e.g. "garden salad small and grilled with
+grilled chicken" resolving to a single `CHICKEN` topping candidate) still
+gets `chat.py::_reply_for_search_menu`'s generic "Did you mean Chicken?
+What size would you like?" — confusing for a hit that has no size at all.
+Not a correctness/substitution defect (T-039 already proved no cart
+mutation happens here) — a clarification-wording bug. Scope: make the
+follow-up question depend on the hit's `kind` (gourmet/item needing size →
+ask size; topping → ask which pizza/whether to add it; non-pizza item with
+no size variants → just confirm). Low priority (UX polish, not order
+correctness) but real and reproducible.
+
 **T-037 is DONE (2026-09-16)** — persistence + customer identity, the
 blocker STATUS.md has flagged High severity since early on. New
 `lakewood/persistence/` package: `SessionRepository` interface with
@@ -29,7 +156,7 @@ LLM calls. Fake-LLM tests prove durable confirmation and restart-safe F6.
 
 ## T-038 Phase 2 · Local voice loop
 
-**Priority:** 1 · **Status:** Not started · **Phase:** 6 (voice layer, per
+**Priority:** 1 · **Status:** In progress · **Phase:** 6 (voice layer, per
 CLAUDE.md's MVP build order — comes after the eval gate, which is done, and
 before persistence's remaining layers: customer memory/reorder fast path
 depend on this existing first)
@@ -41,6 +168,32 @@ T-037 built and tested the persistence machinery
 persisted) and no telephony/voice loop exists yet. This is the first task
 that actually needs the STT/TTS/telephony provider decision ADR-004 deferred
 to this phase.
+
+**2026-09-17 provider increment:** Parakeet is selected for the local pilot
+after a same-file hardware benchmark: 0.082 s warm median for 2.586 s audio
+(31.5x realtime, 2.60 GB GPU peak) versus faster-whisper `small` CPU at
+2.748 s (0.9x realtime, 0.95 GB RSS). ADR-016 records the decision. A warm,
+localhost-only WSL server (`scripts/parakeet_server.py`) and Windows-side
+`ParakeetProvider` are implemented; faster-whisper remains a fallback. Offline
+provider/error-path tests and the full repository suite are green.
+
+**Hardware run completed 2026-09-17:** 10/10 microphone turns traversed the
+full capture -> warm WSL Parakeet -> PersistentChat -> Windows SAPI path with
+no transport/provider crash. Median capture 5.219 s, STT 0.320 s, app 0.000 s,
+TTS synthesis 0.360 s, total 5.899 s; observed maxima/p95 at N=10 were 5.343,
+0.391, 0.000, 0.391, and 6.235 s respectively. Post-capture processing was
+~0.688 s median. The fixed five-second recorder, not STT, dominates total
+latency and must be replaced by endpointing/VAD before a phone pilot.
+
+**Phase 2 is still NOT DONE because order correctness failed.** The run used
+the deliberately limited `RuleBasedInterpreter`: it dropped requested items
+and intensity, confused half scope, mapped salad/calzone/wrap requests onto an
+existing pizza, and failed ordinary non-pizza menu requests. At least two STT
+outputs also appear materially mistranscribed, but the spoken ground truth was
+not written down, so no honest STT accuracy rate can be calculated. Next:
+repeat a labeled, coherent human order flow through the actual candidate LLM
+interpreter, then add every observed STT/interpreter failure as a permanent
+fixture before changing prompts or parsing.
 
 **Scope:** pick/confirm the voice provider (ADR-004a, if not already
 resolved by the time this starts), build the call-handling loop that: (1)

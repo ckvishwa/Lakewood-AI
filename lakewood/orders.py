@@ -143,7 +143,34 @@ NON_PIZZA_ALIASES = {
 # "can of soda" is deliberately excluded: it names the container, not a
 # generic catch-all, so it never competes with a size alias the way the
 # bare words below do.
-_GENERIC_DRINK_ALIASES = {"coke", "pepsi", "soda", "pop"}
+#
+# Public (not `_`-prefixed): interpreter.py's RuleBasedInterpreter._find_drink
+# resolves the SAME precedence via non_pizza_alias_hits() below — T-039 found
+# it had its own second, never-updated copy of this exact alias table, which
+# silently reintroduced the "two liter coke" -> CAN collision T-032 fixed
+# here alone, plus its own worse bug (a bare "can", i.e. the modal verb in
+# "can I get...", as a false drink signal). One table, one precedence rule,
+# two callers — that bug class cannot recur by construction.
+GENERIC_DRINK_ALIASES = {"coke", "pepsi", "soda", "pop"}
+
+
+def non_pizza_alias_hits(raw_q: str) -> list[tuple[str, str]]:
+    """NON_PIZZA_ALIASES matches in `raw_q` that survive the generic-vs-
+    specific precedence rule (T-032): a specific drink size ("two liter")
+    always wins over a co-occurring generic catch-all ("soda"/"coke"/"pepsi"/
+    "pop") in the SAME query. Returns `(alias, canonical_name)` pairs in
+    `NON_PIZZA_ALIASES` order; a caller wanting a single best answer takes
+    the first entry, a caller wanting every real candidate (search_menu) uses
+    them all.
+    """
+    # T-041: plural tolerance ("sodas", "bottles") — a customer ordering for
+    # a group says the plural at least as often as the singular; the alias
+    # itself still identifies the same one canonical item either way.
+    matched = [(a, c) for a, c in NON_PIZZA_ALIASES.items()
+               if re.search(rf"\b{re.escape(a)}s?\b", raw_q)]
+    specific = {c for a, c in matched if a not in GENERIC_DRINK_ALIASES}
+    return [(a, c) for a, c in matched
+            if not (a in GENERIC_DRINK_ALIASES and specific and c not in specific)]
 
 # T-020: words that carry no menu-identifying content but routinely appear
 # around a real item/topping name in a natural request and previously broke
@@ -164,6 +191,81 @@ _NUMBER_PREFIX_RE = re.compile(r"^(?:number|num|no\.?|#)\s*#?\s*(\d{1,2})$", re.
 
 _QTY_PIECE_RE = re.compile(r"\b(\d+)\s*(?:pc|piece|pieces)\b")
 
+# T-041: real speech (STT transcripts) gives numbers as words
+# ("number ten", "six piece wings"), never guaranteed as digits. search_menu
+# and the interpreter's evidence-matching layer were both found to fail
+# identically on spelled-out numbers (see docs/STATUS.md's T-041 entry) —
+# the SAME gap in two places is exactly the drift ADR-017 already warned
+# about for alias tables (T-039's duplicated _DRINK_WORDS). One normalizer
+# here, consumed by both callers, closes it by construction rather than by
+# convention. Covers 1-39 (single words plus compound tens, hyphenated or
+# spaced: "twenty seven"/"twenty-seven") — comfortably past the current
+# 27-item GOURMET_ROUND range, with headroom for menu growth.
+_ONES_WORDS = ["", "one", "two", "three", "four", "five", "six", "seven",
+              "eight", "nine", "ten", "eleven", "twelve", "thirteen",
+              "fourteen", "fifteen", "sixteen", "seventeen", "eighteen",
+              "nineteen"]
+_TENS_WORDS = ["", "", "twenty", "thirty"]
+
+WORD_TO_NUMBER: dict[str, int] = {}
+for _i, _w in enumerate(_ONES_WORDS):
+    if _w:
+        WORD_TO_NUMBER[_w] = _i
+for _ti, _tw in enumerate(_TENS_WORDS):
+    if not _tw:
+        continue
+    WORD_TO_NUMBER[_tw] = _ti * 10
+    for _oi, _ow in enumerate(_ONES_WORDS[1:10], start=1):
+        WORD_TO_NUMBER[f"{_tw}-{_ow}"] = _ti * 10 + _oi
+        WORD_TO_NUMBER[f"{_tw} {_ow}"] = _ti * 10 + _oi
+del _i, _w, _ti, _tw, _oi, _ow
+
+# Longest key first: "twenty seven" must not partially match "twenty" and
+# leave "seven" for a second, independent substitution (which would produce
+# "20 7" instead of "27").
+_NUMBER_WORDS_ALT = "|".join(re.escape(k) for k in
+                             sorted(WORD_TO_NUMBER, key=len, reverse=True))
+# T-041 (found during implementation, not the original design): a FIRST
+# version of this function replaced every standalone spelled number
+# anywhere in the text ("one" -> "1" unconditionally) and broke
+# `_ONE_HALF_RE`'s "on one half"/"a half" half-portion idiom outright —
+# "one" means something completely different there than it does in
+# "number one" or "six piece wings". Anchored to the two contexts a real
+# order actually spells a number in: right after "number"/"num"/"no."/"#"
+# (a gourmet-number reference), or right before "piece(s)"/"pc" (a wing-
+# count reference). Deliberately NOT a general-purpose word-to-number
+# converter — see docs/decisions/ADR-017's T-041 amendment.
+_NUMBER_PREFIX_WORD_RE = re.compile(
+    rf"\b(number|num|no\.?|#)\s*#?\s*({_NUMBER_WORDS_ALT})\b", re.I)
+_PIECE_QTY_WORD_RE = re.compile(
+    rf"\b({_NUMBER_WORDS_ALT})\s*(pc|piece|pieces)\b", re.I)
+
+
+def normalize_spoken_numbers(text: str) -> str:
+    """Replace a spelled-out cardinal with its digit form, but ONLY right
+    after a number-reference word ('number ten' -> 'number 10') or right
+    before a piece-count word ('six piece' -> '6 piece'). Idempotent — safe
+    to call more than once on the same text."""
+    text = _NUMBER_PREFIX_WORD_RE.sub(
+        lambda m: f"{m.group(1)} {WORD_TO_NUMBER[m.group(2).lower()]}", text)
+    text = _PIECE_QTY_WORD_RE.sub(
+        lambda m: f"{WORD_TO_NUMBER[m.group(1).lower()]} {m.group(2)}", text)
+    return text
+
+
+def normalize_menu_text(text: str) -> str:
+    """The one shared normalizer for 'do these words denote this SKU' —
+    used by search_menu's own query handling AND by the interpreter's
+    evidence-matching layer (lakewood/interpreter.py's mutation-boundary
+    guard) on the customer's utterance. Spelled numbers -> digits, then
+    digit+piece-word -> the abbreviated 'Npc' form real menu keys use
+    ('six piece wings' -> '6 piece wings' -> '6pc wings', matching
+    '6PC WINGS'). Idempotent. See docs/decisions/ADR-017's T-041 amendment
+    for why this must be ONE function, not two independently-drifting
+    copies."""
+    t = normalize_spoken_numbers(text)
+    return _QTY_PIECE_RE.sub(r"\1pc", t)
+
 # Words that describe "the base pizza" itself rather than naming a specific
 # specialty/topping — see the CHEESE PIZZA pseudo-hit below. Anything else
 # left over in the query has to be a real, already-matched topping/gourmet
@@ -171,13 +273,14 @@ _QTY_PIECE_RE = re.compile(r"\b(\d+)\s*(?:pc|piece|pieces)\b")
 # customer likely asked for something that doesn't exist, and F7 says stay
 # a miss, not a guessed substitute.
 _GENERIC_PIZZA_WORDS = {w for key in SIZE_ALIASES for w in key.split()} | {
-    "pizza", "cheese", "plain", "regular", "a", "the", "an", "order",
-    "get", "want", "like", "please", "some", "just", "i'd", "id", "me",
+    "pizza", "pizzas", "cheese", "plain", "regular", "a", "the", "an",
+    "order", "get", "want", "like", "please", "some", "just", "i'd", "id",
+    "me",
 }
 
 
 def _strip_search_filler(q: str) -> str:
-    q = _QTY_PIECE_RE.sub(r"\1pc", q)   # "12 piece"/"12 pieces" -> "12pc"
+    q = normalize_menu_text(q)   # "six piece"/"12 pieces" -> "6pc"/"12pc"
     words = [w for w in q.split() if w not in _SEARCH_FILLER_WORDS]
     return " ".join(words)
 
@@ -428,6 +531,25 @@ def _register_disambiguation(sess: Session, query: str, hits: list[dict]) -> Non
         {"query": query, "candidates": hits, "key": key, "ask_count": 0})
 
 
+def _narrow_disambiguation(sess: Session, current: list[dict], narrowed: list[dict]) -> None:
+    """Replace one outstanding candidate set with a deterministic subset.
+
+    ``Session.pending_disambiguations`` is the authoritative, persisted
+    clarification state.  ``ChatState.pending_clarification`` may mirror it
+    for presentation/pronoun handling, but narrowing only that transient list
+    would be lost on reload and would incorrectly let a later size-only reply
+    choose across the original, wider set.
+    """
+    current_key = _disambiguation_key(current)
+    narrowed_key = _disambiguation_key(narrowed)
+    for entry in sess.pending_disambiguations:
+        if entry["key"] != current_key:
+            continue
+        entry["candidates"] = list(narrowed)
+        entry["key"] = narrowed_key
+        return
+
+
 def _clear_disambiguations_matching(sess: Session, *, item_name: str | None = None,
                                     gourmet_number: int | None = None,
                                     topping_name: str | None = None) -> None:
@@ -497,7 +619,12 @@ def search_menu(sess: Session, query: str, category: str | None = None):
       for non-pizza items, so "extra cheese" and "strawberry cheesecake"
       could never resolve even though the item they mean is real.
     """
-    raw_q = (query or "").lower().strip()
+    # T-041: normalize spelled-out numbers ("number ten" -> "number 10")
+    # before anything else touches raw_q — every check below (gourmet
+    # number, filler-stripped q, the CHEESE PIZZA pseudo-hit) reads from
+    # this one normalized value, so a real spoken form can never resolve
+    # here but not there.
+    raw_q = normalize_spoken_numbers((query or "").lower().strip())
     q = _strip_search_filler(raw_q)
     num_match = _NUMBER_PREFIX_RE.match(raw_q) or _NUMBER_PREFIX_RE.match(q)
     num_q = num_match.group(1) if num_match else (raw_q if raw_q.isdigit() else None)
@@ -527,7 +654,7 @@ def search_menu(sess: Session, query: str, category: str | None = None):
     # match as a fragment inside an unrelated word), so this cannot regress
     # a case that relied on the old behavior — see
     # `test_search_menu_alias_collision.py`.
-    _pizza_mentioned = bool(re.search(r"\bpizza\b", raw_q))
+    _pizza_mentioned = bool(re.search(r"\bpizzas?\b", raw_q))
     _cheese_alias_suppressed = False
     for alias, canon in ALIASES.items():
         # T-032: "cheese" (bare) + "pizza" names the base ITEM ("cheese
@@ -562,14 +689,7 @@ def search_menu(sess: Session, query: str, category: str | None = None):
     # the cheese/pizza fix above: a more specific thing the customer
     # actually named outranks a generic word that happens to trail it.
     # "soda"/"coke"/"pepsi"/"pop" alone (no specific size) are unaffected.
-    _matched_np_aliases = [(a, c) for a, c in NON_PIZZA_ALIASES.items()
-                           if re.search(rf"\b{re.escape(a)}\b", raw_q)]
-    _specific_drink_sizes = {c for a, c in _matched_np_aliases
-                             if a not in _GENERIC_DRINK_ALIASES}
-    for alias, canon in _matched_np_aliases:
-        if alias in _GENERIC_DRINK_ALIASES and _specific_drink_sizes \
-                and canon not in _specific_drink_sizes:
-            continue
+    for alias, canon in non_pizza_alias_hits(raw_q):
         if canon not in item_names:
             hits.append({"kind": "item", "name": canon})
             item_names.add(canon)
@@ -593,7 +713,7 @@ def search_menu(sess: Session, query: str, category: str | None = None):
     if _residual_topping and _residual_topping not in topping_names:
         hits.append({"kind": "topping", "name": _residual_topping})
         topping_names.add(_residual_topping)
-    if re.search(r"\bpizza\b", raw_q) and not any(h["kind"] == "gourmet" for h in hits) \
+    if re.search(r"\bpizzas?\b", raw_q) and not any(h["kind"] == "gourmet" for h in hits) \
             and "CHEESE PIZZA" not in item_names \
             and (not _pizza_residual or hits or _residual_topping or _cheese_alias_suppressed):
         hits.append({"kind": "item", "name": "CHEESE PIZZA"})

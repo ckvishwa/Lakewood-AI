@@ -11,7 +11,7 @@ number, matching CLAUDE.md's "track failures by category" rule for the NL
 interpreter eval and applying the same discipline one layer earlier.
 
 Run: `python -m lakewood.stt.eval` (fake provider by default — set
-LAKEWOOD_STT_PROVIDER=faster_whisper for the real local model).
+LAKEWOOD_STT_PROVIDER=parakeet or faster_whisper for a real local model).
 """
 
 from __future__ import annotations

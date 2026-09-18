@@ -30,12 +30,15 @@
   assert_final: {subtotal: "34.00", total: "33.28", state: BUILDING}
 
 - id: COUPON-002
-  tags: [coupon, refusal]
+  tags: [coupon, refusal, substitution_guard]
+  # T-039A: "three dollars off thirty" is unexplained product/request
+  # content riding along with "small cheese," not pizza shorthand — same
+  # correction as ADV-002/ADV-004. Routed to a real menu lookup instead of
+  # assuming pizza intent.
   setup: {order_type: pickup}
   turns:
     - user: "small cheese, and can I get three dollars off thirty"
       calls:
-        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
-        - {tool: apply_coupon, args: {code: OFF_3_AT_30}, expect_error: COUPON_NOT_APPLICABLE}
-      forbid: [confirm_order]
-  assert_final: {subtotal: "11.00", state: BUILDING}
+        - {tool: search_menu, args: {query: "small cheese, and three dollars off thirty"}}
+      forbid: [add_item, apply_coupon, confirm_order]
+  assert_final: {subtotal: "0.00", state: BUILDING}

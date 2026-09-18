@@ -3,8 +3,10 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-16 on Windows/local (T-037). This directory is not a
-Git repository, so no verified commit ID or Git diff is available.
+Last verified: 2026-09-18, live N=3 Experiential re-acceptance gate for
+T-041 (`gpt-5.6-luna`), branch `codex/parakeet-stt`. Real GPU numbers in
+the T-038 Phase 2 entry below were measured separately on the owner's
+Windows/WSL hardware and are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -19,6 +21,529 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-041 done, 2026-09-18: the evidence check is a second retrieval system
+— unify it. Live N=3 re-run PASSES the primary substitution-safety
+objective; historical-overlap score partially recovers (40.33 -> 47.0
+mean) and does not reach the full T-032 pre-guard band (54.33) — the
+remaining gap is unrelated model-capability limitations (multi-item
+ordering, negation, coupon math, confirmation flow), not authorization.**
+
+The prior T-039 live gate found zero silent substitutions but a
+historical-overlap collapse (54.33 -> 40.33 mean) root-caused to the
+mutation-boundary guard's own evidence-matching vocabulary being narrower
+than real, non-adversarial customer language — plurals, intensity words,
+spelled gourmet numbers, spelled quantity phrases. **Part 1 (architecture,
+done before any patch): checked directly whether `search_menu` had the
+same gaps rather than assuming the evidence check was uniquely broken —
+it did**, proven against the real function: `search_menu(sess, "number
+ten")`/`"six piece wings"`/`"large pizzas"`/`"sodas"` all returned
+`NO_MATCH` before this task. Unified with one shared normalizer in
+`orders.py` (`normalize_spoken_numbers`/`normalize_menu_text`), consumed
+by both `search_menu` and the interpreter's evidence layer — not four
+independent patches. A first version of the normalizer converted every
+standalone spelled number anywhere in the text and broke `_ONE_HALF_RE`'s
+"on one half" idiom outright (caught by the full suite going red, not
+designed for up front) — fixed by anchoring conversion to exactly the two
+contexts a real order spells a number in (`number`/`num`/`no.`/`#` prefix,
+or `piece(s)`/`pc` suffix), never a bare standalone word.
+
+**All four named gaps closed at the root**, verified unit-level in
+`tests/test_t041_evidence_vocabulary.py` (22 new tests) and corpus-level
+in `evals/cases/t041_evidence_gaps.yaml` (10 new cases). **Part 3
+asymmetry fixed:** `LLMInterpreter` gained `_narrow_pending_
+disambiguations`, called once per turn regardless of what tool call (if
+any) the model makes — closing the exact `NONPIZZA-006` flakiness the
+prior live gate found (1 of 3 runs failed with an unnecessary
+`transfer_to_human`; the other 2 passed only by the accident of an extra
+`search_menu` call). Kept structurally separate from
+`_authorize_item_creation`, which stays pure/deterministic/no-side-effects
+per the task's own non-negotiable safety line. Full mechanism, the "why
+not a single `authorize_cart_mutation()`" analysis, and every consequence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-041 amendment.
+
+**A label-authoring finding, reported honestly rather than buried:** 3 of
+the 4 new gap-regression corpus cases I authored (`QTY-PLURAL-001`,
+`INTENSITY-WORD-001`, `WINGS-QTY-WORD-001`) had WRONG expected carts —
+each asserted a cart matching `RuleBasedInterpreter`'s own separate,
+pre-existing capability limits (no multi-item creation; no DOUBLE/TRIPLE
+text extraction; T-040's own filed single-hit UX bug) rather than the
+objectively correct customer-facing answer. The real model got all 3
+right, identically, in all 3 live runs — proof the labels were wrong, not
+the model. Corrected post-gate (labels only, no interpreter/prompt/
+threshold changes, and only after all 3 runs completed per this task's own
+rule against changing labels mid-gate) — `RuleBasedInterpreter` now
+honestly fails all 3, same documented-limitation shape as `MOD-020`/
+`GOURMET-005`. Rule-based ratchet: 58/91 (was 61/91 with the wrong labels,
+50/81 before this task) — full arithmetic in `tests/test_evals.py`.
+
+**Live N=3 results** (`LAKEWOOD_LLM_PROVIDER=experiential`, `gpt-5.6-luna`,
+identical config across all 3 runs, sequential, no code/prompt/label
+changes during the runs):
+
+```
+                 full/91 (raw)  full/91 (corrected labels)  overlap/73  provider fails
+Run 1            62             65                          48          1 (NONPIZZA-007, HTTP 502 timeout)
+Run 2            64             67                          49          0
+Run 3            59             62                          44          0
+mean             61.7           64.7                        47.0
+```
+
+"Corrected labels" = the raw score plus the 3 cases fixed above (all 3
+behaved identically/correctly in all 3 runs — verified directly from the
+raw trace data, not re-run). Historical-overlap mean **47.0**, up from the
+prior gate's 40.33 (+6.67), still below T-032's pre-guard 54.33. The
+remaining overlap gap is NOT authorization-related: the 73-overlap
+failures (`CORRECT-003/004/006/007`, `NEG-003/005/007`, `MULTI-*`,
+`QTY-003`, `MOD-014/030/035/036`, `GOURMET-005/010/011/013`,
+`SLANG-001/003`, `DECLINE-001`, `FAQ-001`, `ADV-001`, `CONFIRM-002`,
+`DELIVERY-002`, `TRANSFER-003/004`, `DISAMBIG-CAP-001`) are multi-item
+ordering, negation handling, coupon math, and confirmation-flow accuracy —
+pre-existing model-capability categories, already filed (T-017/T-028/
+T-029/T-033-036) or out of this task's scope by its own instructions, not
+new defects this task introduced or could fix by further loosening the
+guard.
+
+**Primary acceptance criterion — zero silent substitutions — PASSES,
+robustly, re-confirmed:** every `add_item` across all 3 runs (277 calls
+with a reason code) scanned programmatically for an authorization bypass.
+**Zero found, in every run**, same methodology as the prior gate. Zero
+internal error/reason-code leaks into any customer reply (scanned all 3
+full traces). **The rejection ratio inverted, exactly the signal the task
+asked for**: `DIRECT_UTTERANCE_EVIDENCE` (44, 44, 45 per run) now exceeds
+`UNSUPPORTED_ITEM_SUBSTITUTION` (32, 31, 28) in every run — before this
+task the refusal path ran hotter than the success path (60/56/61 vs
+37/36/36); Part 1's fix reached the real problem, not a symptom of it.
+
+Full reason-code breakdown per run:
+
+```
+                                     Run1  Run2  Run3
+DIRECT_UTTERANCE_EVIDENCE             44    44    45
+UNIQUE_SUPPORTED_SEARCH_RESULT        11    10     8
+CUSTOMER_CONFIRMED_PENDING_CANDIDATE   6     7     7
+AMBIGUOUS_CANDIDATE_NOT_CONFIRMED      1     2     1
+UNSUPPORTED_ITEM_SUBSTITUTION         32    31    28
+```
+
+**T-039-specific case-by-case review (Part 4 of the task): all 6 "voice
+session noun" cases (the exact utterances from the original T-038 real-
+call P0 — calzone, chicken caesar wrap, appetizer, soup, tacos, garlic
+bread) plus the gourmet-cardinal regression case passed in ALL 3 runs,
+21/21 — zero pizza fabrication, empty cart every time.** Classified
+`SAFE_REFUSAL` throughout: several turns included a real `search_menu`
+`ok` hit along the way (e.g. `VOICE-CALZONE-001` sometimes finds `CALZONE
+ITEM`), but the model never committed an `add_item` for any of them
+without further customer confirmation — cart stayed empty in every single
+instance, across all 3 runs, for all 7 cases. This is the exact defect
+class T-038's real session found; it does not reappear.
+
+Full per-case classification, provider usage (tokens/latency/cost), and
+trace paths: `docs/EVALS.md`'s T-041 live-gate section.
+
+**Recommended next task: T-038 Phase 2's remaining item** (real-hardware
+Parakeet voice loop) — the primary, P0-relevant substitution-safety
+objective this gate exists to verify is fully closed and re-confirmed
+live, with zero regressions. The residual overlap-score gap to the T-032
+band is real but is a collection of unrelated, already-tracked model-
+capability limitations, not a reason to keep blocking hardware work on
+this specific gate.
+
+**T-039 live N=3 Experiential acceptance gate: FAIL (evidence-vocabulary
+gap), 2026-09-18. Primary substitution-safety objective PASSES cleanly.**
+Ran the real `LAKEWOOD_LLM_PROVIDER=experiential` (`gpt-5.6-luna`) provider
+against the full 81-case corpus three times sequentially, no code/prompt/
+label changes between runs, one trace file preserved per run:
+
+```
+Run 1: 48/81 full-corpus, 41/73 historical-overlap — trace evals/traces/20260918T124814_llm.jsonl
+Run 2: 47/81 full-corpus, 39/73 historical-overlap — trace evals/traces/20260918T125937_llm.jsonl
+Run 3: 49/81 full-corpus, 41/73 historical-overlap (1 provider timeout on CONFIRM-004, preserved honestly, not retried) — trace evals/traces/20260918T131230_llm.jsonl
+```
+
+Historical-overlap set (73 case IDs) determined from git history, not
+guessed: `evals/cases/non_pizza_items.yaml` was introduced wholesale (8
+case IDs, `NONPIZZA-001`..`008`) in the single commit that closed T-039
+(`57344f2`); the corpus at the parent commit was independently counted at
+exactly 73 `- id:` entries across the other 10 case files, and no other
+commit since has added or removed a case ID (`adversarial.yaml`,
+`invalid_and_ambiguous.yaml`, `store_info_and_coupons.yaml` changed
+between then and now, but only relabeled 4 existing IDs per ADR-017's
+T-039A amendment — case counts unchanged, verified directly). 81 - 8 = 73,
+matching the historical corpus size exactly.
+
+**Comparison against the T-032 band (53/54/56, mean 54.33, same provider
+and model):** 41/39/41 (mean 40.33) — a real, substantial drop. Every
+add_item authorization across all 3 runs (316 calls total) was scanned
+programmatically for a bypass (an `ok` result whose `authorization_reason`
+is not one of the three authorized codes): **zero found, in every run.**
+Zero silent substitutions, zero unauthorized cart mutations, zero internal
+error/reason-code strings leaked into any customer-facing reply (scanned
+all 3 full traces). This is the primary objective T-039/T-039A/T-039B
+exists to gate, and it holds robustly.
+
+**The score drop is NOT explained by "safe refusal of an adversarial
+substitution attempt."** Root-caused instead to pre-existing, narrow
+evidence-vocabulary gaps in the mutation-boundary guard that were never
+consequential before T-039B (when ANY search hit authorized a mutation,
+regardless of exact wording) and are now newly load-bearing:
+
+1. `_PIZZA_WORD_RE` (`\bpizza\b|\bpie\b`) does not match the PLURAL
+   ("pizzas"/"pies") — `\b` requires a non-word boundary immediately after
+   the word, which a trailing "s" is not. Reproduced directly:
+   `_has_pizza_intent("three medium cheese pizzas")` → `False`. Blocks
+   correctly-specified multi-item/quantity pizza orders (`QTY-002`,
+   `MULTI-001/003/004/006`, all 3 runs, identical failure).
+2. `_pizza_shorthand_residual`'s intensity vocabulary has no entry for
+   "triple"/"quadruple" (only the words T-039A's original authoring
+   session used). `_has_pizza_intent("small cheese with triple
+   pepperoni")` → `False` — the whole utterance is correctly pizza-shaped
+   and the model's proposed item/size is exactly right, but the residual
+   word "triple" blocks it (`MOD-032`, all 3 runs).
+3. Gourmet-number evidence (`_item_hit_supported_by_utterance`'s
+   `kind == "gourmet"` branch) only matches numeral digits (`#10`/"number
+   10"), never a spelled-out cardinal ("number ten"). Blocks legitimate
+   gourmet selections stated in ordinary spoken English
+   (`GOURMET-005/010/011/012/013`, all 3 runs).
+4. Non-pizza item/candidate word-matching (`_item_hit_supported_by_
+   utterance`, `_select_pending_candidate`, `oe.non_pizza_alias_hits`) has
+   no mapping from a spelled-out quantity phrase ("six piece wings") to an
+   abbreviated menu-key token ("6PC WINGS") — blocks a legitimate wing
+   order even after the customer explicitly answers the system's own
+   disambiguation question (`CORRECT-007`, `MULTI-002`, `COUPON-001`, all
+   3 runs, identical failure shape each time).
+
+None of these four ever produced a wrong item in the cart — the guard
+correctly refused every one (empty/unchanged cart in every case), which is
+why the primary criterion still holds. But they DO falsify the "supported
+direct orders still work" acceptance criterion, which the task requires
+literally: a real, well-specified, non-adversarial customer utterance was
+wrongly refused, reproducibly, in all 3 runs, for the same root cause each
+time. **Filed as T-041** (see `docs/NEXT_TASKS.md`) — the smallest bounded
+fix is expanding the evidence vocabulary in the four spots above, not
+re-architecting the guard.
+
+**One additional, narrower, genuinely flaky finding: `NONPIZZA-006`
+("I want a salad." → "The garden one." → "Large.") failed in Run 1
+(unnecessary `transfer_to_human`) but passed in Runs 2 and 3.** Cause:
+`LLMInterpreter` has no equivalent of `RuleBasedInterpreter`'s
+`_narrow_disambiguation` — when the model's own reply narrows the
+candidate set conversationally ("Would you like the small or large Garden
+Salad?"), `session.pending_disambiguations` is never actually narrowed for
+the LLM path, so a later bare "Large." must still resolve against the
+original 4-candidate, 2-family set, which `_select_pending_candidate`
+correctly refuses to guess across. In Runs 2/3 the model happened to issue
+an additional `search_menu("GARDEN SALAD", ...)` that registered a NEW,
+already-narrowed 2-candidate entry, which the bare "Large." then resolved
+against — a real but incidental self-recovery, not a designed one. In Run
+1 the model's retry query ("large garden salad") returned `NO_MATCH`
+instead, so no narrower entry existed and the model gave up and
+transferred. Cart stayed empty and correct in the failing run — not a
+substitution, a lower-severity UX gap (SYSTEM_DEFECT class, not P0).
+Rolled into the same T-041 follow-up scope as a secondary item, since it
+shares the same "LLM path lacks a capability `RuleBasedInterpreter`
+already has" shape as finding 4 above.
+
+**Zero pricing mismatches were caused by any T-039B code change.**
+`orders.py`'s pricing/domain code is untouched by T-039B except
+`_narrow_disambiguation` (which never touches price). The two pricing-
+label misses observed (`MOD-035`, `MOD-036`) both trace to pre-existing,
+unrelated model behavior — an ambiguous topping search the model abandoned
+without asking (`MOD-035`, the pizza itself priced correctly) and the
+model choosing `DOUBLE` mozzarella intensity for "extra cheese" (`MOD-036`,
+a modifier-selection choice, not an item-authorization one) — not to the
+mutation-boundary guard.
+
+Full authorization-reason breakdown, hallucinated-SKU counts (all
+domain-layer rejections, never a mutation), latency, and token/cost
+figures per run: `docs/EVALS.md`'s T-039 live-gate section.
+
+**Recommended next task: T-041** (the evidence-vocabulary fix above), NOT
+T-038 Phase 2 — the FAIL branch of this gate's own acceptance criteria
+("Supported direct orders still work") means the live gate has not yet
+fully closed, even though the P0-relevant half (silent substitution risk)
+is fully closed and re-confirmed across three independent live runs.
+
+**T-039B done, 2026-09-18: T-039A's LLM-path mutation-boundary guard
+(`_item_creation_is_authorized`) treated ANY `search_menu` hit returned
+during the same turn as authorization for a matching `add_item` — even a
+hit registered under `needs_disambiguation=True`, and even when the
+model's own search query had no support in the customer's utterance at
+all.** Reproduced directly: with the customer saying only "I want a
+salad," a model calling `search_menu("wrap")` then `add_item("WRAP")` was
+authorized and added a $12.00 wrap; the same shape worked for a
+`search_menu("coke")`→`add_item("CAN")` substitution and a
+`search_menu("bruschetta")`→gourmet-pizza substitution. A retrieved
+candidate was being treated as customer consent instead of evidence for a
+clarifying question.
+
+**Fix: `_authorize_item_creation` replaces `_item_creation_is_authorized`
+and returns a stable reason code, not a bare boolean** — only
+`AUTH_DIRECT_UTTERANCE_EVIDENCE`, `AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`,
+and `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` authorize the mutation.
+`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT` now requires the hit to not have
+been returned ambiguously AND both the model's search query and the exact
+retrieved SKU to be independently supported by the customer's own words
+(`_search_query_supported_by_utterance`/`_item_hit_supported_by_utterance`)
+— a model can no longer manufacture authorization by choosing a favorable
+query. `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` deterministically
+matches an explicit follow-up ("the large garden salad") against the
+server-owned `session.pending_disambiguations` set
+(`_select_pending_candidate`, shared by both interpreters), including
+narrowing a family ("the garden one") before a later bare size ("large")
+resolves it against the now-narrowed set. Anything else returns
+`AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED` or
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` and the mutation never reaches the
+real tool. Full mechanism and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+
+**Same-task persistence fix:** `search_menu` was treated as read-only by
+`PersistentChat`, but an ambiguous result mutates
+`session.pending_disambiguations`, and that mutation was never saved — a
+dropped call or reload between the ambiguous search and the customer's
+next turn silently lost the pending clarification. `PersistentChat.run_turn`
+now fingerprints `session.unresolved_lookups`/`pending_disambiguations`
+before and after the turn and saves through the existing repository path
+only when that fingerprint actually changes; a harmless unique/miss search
+still writes nothing. `PersistentChat._chat_for` restores the presentation
+cache (`ChatState.pending_clarification`) from the authoritative,
+just-loaded `session.pending_disambiguations` on every load/resume, so a
+recovered session's next turn resolves against the real reloaded candidate
+set, proven with a real `PersistentChat` + `InMemorySessionRepository`
+round trip, not serialization helpers alone.
+
+Offline: full suite 561 passed / 2 skipped / 2 xfailed (up from 546 — 15
+new tests in `tests/test_t039b_candidate_authorization.py`, zero
+regressions); `validate` 81/81 (was 78/78 — 3 new corpus cases, no
+regressions); rule-based ratchet 50/81 (was 46/78) — +1 genuine flip
+(`NONPIZZA-005`'s second turn, "the small one," now resolves via
+`_select_pending_candidate` instead of the old raw substring check that
+could never match a spoken size word against an abbreviated SM/LG suffix)
++3 new cases, all passing as authored; pricing parity 50/50 unchanged.
+Full arithmetic: `tests/test_evals.py`'s baseline comment.
+
+**T-039A done, 2026-09-17 (reopened T-039, same day): T-039's fix was a
+12-word denylist, not the general invariant it claimed.** Confirmed
+directly on the commit that closed T-039 (`765fe1f`): "A medium nachos with
+chicken." → a fabricated medium cheese pizza with chicken, $16.00 — same
+defect, different noun, because `_NON_PIZZA_HEAD_WORDS` only special-cased
+12 literal words and anything else still fell through to `_new_pizza`'s
+unconditional default. Four more adversarial nouns (soup, tacos, appetizer,
+garlic bread) reproduced the identical failure. The LLM path was also
+unprotected against a model substituting a *valid* SKU (not just a
+fabricated unknown one) — T-039's own LLM test only ever scripted the
+latter, false confidence never caught by real evidence.
+
+**Fix: replaced the denylist entirely with fail-closed intent parsing.** A
+pizza may be created only when the utterance gives positive evidence — the
+word "pizza"/"pie", or a fully-explained pizza-shorthand utterance where
+every meaningful token is a real size/topping/modifier/quantity/filler,
+nothing left over (`_has_pizza_intent`/`_pizza_shorthand_residual` in
+`lakewood/interpreter.py`). This subsumes the old denylist with zero
+enumeration — "nachos"/"soup"/"tacos"/"appetizer"/"garlic bread" all block
+correctly without ever being named in code, same mechanism as any other
+unrecognized noun. `RuleBasedInterpreter`'s `_new_pizza` trigger and the
+bare-topping graft onto an open line are both gated by the SAME predicate.
+The LLM path gets its own structural mutation-boundary guard
+(`_item_creation_is_authorized`, generalized past pizza to any valid-SKU
+substitution): a model's `add_item` call is authorized only by the
+utterance's own evidence (pizza only) or a matching `search_menu` hit
+already returned THIS turn — never on the model's say-so alone. Direct
+pizza orders with no prior search and real `search_menu`→selection flows
+both still work, proven by test. Full mechanism, tradeoffs, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s "Amendment"
+section (supersedes its original "Decision" section, kept for historical
+context); corpus-blind-spot follow-up: `docs/EVALS.md`'s T-039 section,
+"Correction — T-039A."
+
+**Part 4 (customer-safe failures) extended in the same task:** unknown tool
+names from BOTH interpreters' mutation loops, raw Python exception text
+from a caught `TypeError`/`ValueError`, provider-call failures, and the
+internal "tool loop exceeded N rounds; turn discarded" diagnostic are all
+masked before reaching dialogue — `chat.py`'s mask set grew from
+`{BAD_LINE, NOT_ON_PIZZA}` to include `UNKNOWN_TOOL`/`BAD_ARGS`, and
+`LLMInterpreter.interpret()`'s provider-exception handler no longer
+interpolates the raw exception into what gets spoken (diagnostic detail
+stays available via `last_provider_error` for logs/traces).
+
+**Two real, narrow code gaps found and fixed while investigating corpus
+score flips (not scope creep — direct requirements of the same intent-
+parsing mechanism, not new features):** "add"/"to"/"too" added to the
+pizza-shorthand filler set — natural follow-up phrasing like "add pepperoni
+too" or "actually take the mushrooms off" was being wrongly blocked without
+them (caught by two PRE-EXISTING negation tests that started failing).
+"pie" recognized as pizza-word evidence alongside "pizza" itself — "a plain
+pie, medium" is genuine colloquial pizza language a corpus label already
+expected to work.
+
+**A second, independent hardware-run finding, discovered while diagnosing
+this task, reported honestly rather than left in a test transcript:**
+`tests/test_persistent_chat_path.py`'s own fixture data ("I want a large
+pepperoni and wings." / "12 piece.") was inadvertently exercising a THIRD
+instance of the substitution defect — "12 piece." silently fabricated a
+SECOND small cheese pizza (the numeral "12" collides with the 12-inch SMALL
+size alias) instead of resolving to `12PC WINGS`, and the test's own
+`len(lines) == 2` assertion happened to pass anyway because it only checked
+count, not correctness. Corrected to use two unambiguous single-item pizza
+orders, since the test's real purpose is persistence plumbing, not
+interpreter accuracy; documented in the test itself.
+
+**Known, accepted tradeoff (see ADR-017):** an utterance combining a clear
+pizza base with one unresolvable modifier or clause ("...just put it on my
+medium cheese" with a fabricated "truffle topping"; "large cheese, and
+apply the half off everything code") now refuses the whole utterance rather
+than creating the pizza and separately failing the unresolvable part — less
+convenient for that specific compound shape, and structurally necessary:
+the old reasoning ("a recognized topping word is present, so it's pizza")
+is exactly what made the original defect possible. Four pre-existing
+corpus labels asserting the old behavior were corrected with full
+justification (`ADV-002`, `ADV-004`, `COUPON-002`, `INVALID-002`).
+
+Offline: full suite 546 passed / 2 skipped / 2 xfailed (up from 520 — 26
+new tests: 25 in the new `tests/test_item_substitution_guard_generalized.py`
+plus 1 corrected weak-assertion sibling; zero regressions); `validate`
+78/78 unchanged (label corrections only, no new cases this task); rule-based
+ratchet 46/78 (was 41/78) — +5 genuine flips from the more accurate intent
+gate, −4 from the 4 relabeled adversarial cases, +3 recovered by the
+add/to/too/pie fixes the flip investigation surfaced; pricing parity 50/50
+unchanged. Full arithmetic: `tests/test_evals.py`'s baseline comment.
+
+**Live N=3 sequential run: still BLOCKED, unchanged from T-039** — no
+`EXPLABS_API_KEY` in this environment; this task touched no
+`LLMInterpreter` prompt/tool-description/provider surface that would
+require a fresh live measurement beyond the mutation-boundary guard itself
+(which only ever REJECTS an unauthorized call closer to what the system
+prompt already asks for — it cannot make a well-behaved model's real
+accuracy worse). Owner action still needed to close this measurement.
+
+**T-039 done, 2026-09-17: closed a P0 — `RuleBasedInterpreter` was silently
+substituting a different, real, priced item for one it couldn't resolve
+(a garden salad became a small cheese pizza; "a two liter coke" became a
+can), found by a real 10-turn T-038 Phase 2 voice session that 73 corpus
+cases, every synthetic fixture, and four prior diagnostic sweeps never
+caught.** Full mechanism, fix, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`; corpus-blind-spot
+argument: `docs/EVALS.md` "Real speech found a P0 the corpus never did."
+
+**Diagnosed before any fix, per row:** `_new_pizza` triggered on any
+recognized size word alone and unconditionally defaulted to
+`add_item(item="CHEESE PIZZA")`, never checking whether the utterance
+actually named a pizza; the bare-topping fallback then grafted any
+recognized topping word from ANY later utterance onto that line regardless
+of whether it was about that pizza (a calzone and a chicken caesar wrap were
+both scavenged this way across turns). "Two liter coke" → "1 can" and bare
+"can" (the modal verb in "can I get…") both traced to `_find_drink` using a
+second, independently-drifting copy of the drink alias table that never got
+T-032's precedence fix — a distinct gap, not a T-032 regression.
+`add_item`'s own domain layer was checked directly and was never the
+problem: any unresolved item name already returned `ITEM_NOT_FOUND` and
+mutated nothing — the interpreter just never asked it the real question.
+**`LLMInterpreter` does not share this defect** (no equivalent heuristic;
+verified both that a prompt-following model leaves the cart untouched on a
+miss, and that even a naive hallucinated `add_item` call still fails closed
+at the same domain-layer `ITEM_NOT_FOUND` check).
+
+**Fix:** one shared non-pizza-head-word veto in `interpreter.py` (routes to
+a real `search_menu` lookup instead of assuming pizza, regardless of a
+co-occurring size/topping/drink word or an already-open pizza line) plus
+promoting `orders.py`'s real, precedence-correct `NON_PIZZA_ALIASES`
+resolution (`oe.non_pizza_alias_hits`) to a shared function both
+`search_menu` and `RuleBasedInterpreter._find_drink` call — the private,
+drifting `_DRINK_WORDS` copy is deleted entirely, so this bug class (a fix
+landing in one of two duplicate tables) cannot recur by construction.
+
+**Two supporting bugs from the same session, also fixed:** a domain error's
+raw internal `line_id` ("L5 is not a pizza") was reaching the customer
+verbatim — `chat.py::_customer_safe_error_message` now masks the two codes
+(`BAD_LINE`, `NOT_ON_PIZZA`) grep-verified to embed one, leaving every other
+error code's already-customer-safe message untouched. `LocalVoiceLoop.turn()`
+had nothing catching `STTCallError`/`UnusableAudioError` (a real HTTP 422 on
+silence/noise/a hesitation), so an unusable recording killed the whole
+process — a dropped call on a phone line. It now degrades to a spoken
+apology and the loop continues into the next real turn.
+
+Verified regression tests (14 in `tests/test_item_substitution_guard.py`,
+2 in `tests/test_voice.py`): each row of the real transcript's defect table,
+the domain-layer fail-closed proof, both `LLMInterpreter` structural checks,
+and both internal-error-masking proofs — every one confirmed to FAIL against
+the pre-fix code before confirming it passes post-fix (stash-and-rerun, not
+assumed).
+
+**Corpus:** `evals/cases/non_pizza_items.yaml`, 5 new cases — the first
+non-pizza item orders (`WRAP`, `GARDEN SALAD SM`/`LG` ambiguity) in this
+corpus's history, a genuinely-missing item (`nachos`), and this defect's own
+compound unresolved-head-plus-topping-word shape.
+
+Offline: full suite 520 passed / 2 skipped / 2 xfailed (up from 504 — 16 new
+tests, zero regressions); `validate` 78/78 (was 73/73, pure corpus growth);
+rule-based ratchet 41/78 (was 36/73) — +1 from `DELIVERY-003` (a
+pre-existing corpus case independently found to trip the same bare-"can"
+collision this task fixes), +4 from 4/5 new corpus cases passing under the
+real interpreter as authored (`NONPIZZA-005`'s second turn is a genuine,
+unrelated, pre-existing `RuleBasedInterpreter` limitation, left honestly
+failing); pricing parity 50/50 unchanged. Full commands and output: "Latest
+verification" below.
+
+**N=3 sequential live run: BLOCKED, not run.** `docs/STATUS.md`'s prior live
+baselines (T-031/T-032, 53–56/73) all used `LAKEWOOD_LLM_PROVIDER=experiential`
+(`gpt-5.6-luna`); this environment has no `EXPLABS_API_KEY` configured, and
+this task did not touch `LLMInterpreter`, provider selection, prompts, or
+tool descriptions — nothing eligible for the paid-provider live measurement
+changed. Flagged rather than skipped silently or substituted with a
+different, non-comparable provider (`ANTHROPIC_API_KEY` is present but is
+this session's own credential, not `EXPLABS_API_KEY`, and swapping providers
+would not be comparable to the recorded band regardless). Owner action
+needed to close this specific measurement; everything else in this task's
+acceptance criteria is verified above.
+
+**Voice work resumes** — T-038 Phase 2's remaining item (the real
+microphone → Parakeet → PersistentChat → SAPI hardware loop, 10+ human
+turns, per-stage median/p95) was explicitly paused for this task per its own
+instructions and is unblocked now that this P0 is closed.
+
+**T-038 Phase 2 Parakeet increment PARTIALLY VERIFIED, 2026-09-17.** The
+local voice loop now has a production-shaped local STT boundary:
+`scripts/parakeet_server.py` keeps `nvidia/parakeet-unified-en-0.6b` warm in
+the existing WSL NeMo/CUDA environment; Windows-side
+`lakewood/stt/parakeet_provider.py` sends WAV bytes over localhost and returns
+the unchanged `STTResult` contract. The service is localhost-only, serializes
+inference on the 4 GB GPU, loads once, supports an explicit warm-up file, and
+exposes `/healthz`. The client fails closed for missing/empty/short/corrupt
+audio, service/HTTP failure, malformed JSON, and empty model output. Faster-
+whisper remains available as fallback; no NeMo type or dependency enters the
+Windows app/domain environment. Decision and tradeoffs: ADR-016.
+
+Real same-file hardware measurement: a 2.586125 s human recording transcribed
+correctly by both providers. Parakeet warm median **0.082 s** (~31.5x
+realtime), 2.60 GB GPU peak, 11.073 s cold load; faster-whisper `small` CPU
+median **2.748 s** (0.9x realtime), 0.95 GB RSS, 12.340 s cold load. This
+chooses the latency provider; it is not production-accuracy evidence.
+
+Offline verification: 508 collected, 504 passed / 2 skipped / 2 xfailed;
+`validate` 73/73; rule-based 36/73 (unchanged expected coverage); pricing
+parity 50/50.
+
+**Real hardware E2E run completed after the offline verification:** 10/10
+turns passed through Windows microphone capture -> warm WSL Parakeet ->
+PersistentChat -> Windows SAPI with no service crash, timeout, empty result,
+or playback failure. Median/p95-at-N=10: capture 5.219/5.343 s, STT
+0.320/0.391 s, app 0.000/0.000 s, TTS synthesis 0.360/0.391 s, total
+5.899/6.235 s. Median measured processing after the fixed capture window was
+~0.688 s. Plumbing/latency therefore pass the local target; the fixed
+five-second capture window is now the dominant UX delay and needs VAD or
+push-to-stop endpointing.
+
+**Order correctness failed and T-038 remains PARTIAL.** The hardware run used
+`RuleBasedInterpreter`, whose 36/73 corpus score already says it is a demo
+pattern matcher, not production NLU. The real run reproduced that limitation
+at full severity: requested items/intensity were dropped, second-half scope
+became first-half or whole, and salad/calzone/wrap requests mutated an existing
+pizza. Safe refusals also occurred for menu phrases the matcher did not
+resolve. At least two Parakeet transcripts appear materially wrong, but the
+spoken ground truth was not captured, so an STT accuracy percentage would be
+fabricated. Do not merge these observations into one "voice accuracy" number:
+transport passed, latency passed, STT accuracy is unscored, and interpreter/
+order correctness failed.
 
 **T-038 Phase 1 done, 2026-09-16:** `PersistentChat` now wires the normal
 text path through `resume_or_create`, explicit accept/decline recovery, and
@@ -523,6 +1048,118 @@ model tier (T-013, Ollama + local STT), are unaffected and preserved below;
 the OpenAI T-013c section further below is preserved as-is.
 
 ## Latest verification
+
+```
+python -m pytest --no-header (2026-09-18, T-041)            → 583 passed, 2 skipped, 2 xfailed
+                                                           (was 561 — 22 new tests in
+                                                           tests/test_t041_evidence_vocabulary.py,
+                                                           zero regressions)
+python evals/runner.py validate                          → 91/91 (was 81/81 — 10 new cases,
+                                                           no regressions)
+python evals/runner.py score --adapter rule_based         → 58/91 (was 50/81; see "T-041 done"
+                                                           above for the honest ratchet arithmetic,
+                                                           including the 3-case label correction)
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → Run1 62/91 raw, 65/91 corrected-labels
+                                                           (48/73 overlap, 1 provider timeout on
+                                                           NONPIZZA-007, honestly preserved); Run2
+                                                           64/91 (67/91 corrected, 49/73 overlap);
+                                                           Run3 59/91 (62/91 corrected, 44/73
+                                                           overlap). Zero silent substitutions, zero
+                                                           authorization bypasses, all 3 runs —
+                                                           rejection ratio inverted (evidence now
+                                                           exceeds refusal) in every run. See "T-041
+                                                           done" above for full analysis.
+                                                           Historical-overlap mean 47.0 (was 40.33)
+                                                           vs T-032's pre-guard 54.33 — residual gap
+                                                           is unrelated model-capability categories,
+                                                           not authorization. Traces:
+                                                           evals/traces/20260918T142854_llm.jsonl,
+                                                           20260918T144342_llm.jsonl,
+                                                           20260918T145618_llm.jsonl.
+```
+
+Earlier verification (2026-09-18, T-039 live gate, superseded by T-041's
+re-run above), still valid as a historical record:
+
+```
+python evals/runner.py score --adapter llm (N=3, live)    → Run1 48/81 (41/73 overlap), Run2 47/81
+                                                           (39/73 overlap), Run3 49/81 (41/73
+                                                           overlap, 1 provider timeout on
+                                                           CONFIRM-004, honestly preserved). Zero
+                                                           silent substitutions, zero authorization
+                                                           bypasses, all 3 runs. Historical-overlap
+                                                           mean 40.33 vs T-032's 54.33 — root-caused
+                                                           to evidence-vocabulary gaps, closed by
+                                                           T-041 above. Traces:
+                                                           evals/traces/20260918T124814_llm.jsonl,
+                                                           20260918T125937_llm.jsonl,
+                                                           20260918T131230_llm.jsonl.
+```
+
+Earlier verification (2026-09-18, T-039B, offline only — live gate was
+BLOCKED at that time), still valid and superseded only by the above where
+they overlap:
+
+```
+python -m pytest --no-header (2026-09-18, T-039B)          → 561 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 546 before
+                                                           this task — 15 new tests in
+                                                           tests/test_t039b_candidate_authorization.py;
+                                                           zero regressions.
+python evals/runner.py validate                          → 81/81 (was 78/78 — 3 new corpus cases,
+                                                           no regressions)
+python evals/runner.py score --adapter rule_based         → 50/81 (was 46/78) — see "T-039B done"
+                                                           above for the honest ratchet arithmetic
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+```
+
+Earlier verification (2026-09-17, T-039A), still valid and superseded only by
+the above where they overlap:
+
+```
+python -m pytest --no-header (2026-09-17, T-039A)          → 546 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 520 before
+                                                           that task — 26 new tests; zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78, unchanged (label corrections
+                                                           only, no new cases that task)
+python evals/runner.py score --adapter rule_based         → 46/78 (was 41/78) — see "T-039A done"
+                                                           above for the honest per-flip breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+```
+
+Earlier verification (2026-09-17, T-039), still valid and superseded only by
+the above where they overlap:
+
+```
+python -m pytest --no-header (2026-09-17, T-039)          → 520 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 504 before
+                                                           this task — 16 new tests (14 substitution-
+                                                           guard + 2 voice-crash-recovery); zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78 (was 73/73 — 5 new
+                                                           non_pizza_items.yaml cases)
+python evals/runner.py score --adapter rule_based         → 41/78 (was 36/73) — +1 DELIVERY-003
+                                                           (pre-existing case, same bare-"can" bug),
+                                                           +4 of 5 new corpus cases; see "T-039 done"
+                                                           above for the honest per-case breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → BLOCKED — no EXPLABS_API_KEY in this
+                                                           environment; this task touched no
+                                                           LLMInterpreter/provider/prompt surface.
+                                                           T-032's 53/54/56 (mean 54.33) band is
+                                                           still the current live baseline.
+```
+
+Earlier verification (2026-09-16, T-037), still valid and unaffected by the
+above:
 
 ```
 python -m pytest --no-header (2026-09-16, T-037)         → 472 passed, 2 skipped (live-Postgres-

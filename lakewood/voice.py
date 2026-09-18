@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .chat import PersistentChat, make_interpreter
 from .config import CONFIG
 from .persistence.memory_repository import InMemorySessionRepository
+from .stt.base import STTCallError
 from .stt.faster_whisper_provider import make_stt_provider
 from .tts import make_tts_provider
 
@@ -34,7 +35,23 @@ class LocalVoiceLoop:
         turn_start=time.monotonic()
         try:
             capture=self.microphone.capture(path, seconds)
-            started=time.monotonic(); stt=self.stt.transcribe(path, correlation_id=self.call.call_id); stt_time=time.monotonic()-started
+            started=time.monotonic()
+            try:
+                stt=self.stt.transcribe(path, correlation_id=self.call.call_id)
+            except STTCallError:
+                # T-039 Part 3: silence, a zero-duration recording, or a
+                # provider-rejected clip must degrade to a spoken apology and
+                # let the call continue — this used to propagate straight out
+                # of the loop and kill the whole process, which on a phone
+                # line is a dropped call, not a retryable turn.
+                stt_time=time.monotonic()-started
+                out=path + ".reply.wav"
+                reply="Sorry, I didn't catch that — could you say that again?"
+                spoken=self.tts.synthesize(reply, out)
+                total=time.monotonic()-turn_start
+                self.tts.play(out)
+                return VoiceTurn("", reply, capture, stt_time, 0.0, spoken.latency_seconds, total)
+            stt_time=time.monotonic()-started
             started=time.monotonic(); result=self.call.run_turn(self.interpreter, stt.transcript); app=time.monotonic()-started
             out=path + ".reply.wav"; spoken=self.tts.synthesize(result.reply, out)
             # total excludes playback: PlaySync blocks for the audio's own

@@ -8,6 +8,10 @@ pytest>=8.0        # tests
 # Not part of the lakewood/ runtime stdlib-only policy above.
 faster-whisper>=1.0   # local STT (ADR-008); anthropic/openai LLM providers use stdlib urllib, no SDK needed
 
+# Parakeet is intentionally NOT installed into this Windows/application
+# environment. Its warm localhost service runs from the separately managed
+# WSL NeMo uv environment; see ADR-016 and scripts/parakeet_server.py.
+
 # Optional — only needed to actually construct PostgresSessionRepository
 # (lazy-imported inside lakewood/persistence/postgres_repository.py and
 # migrations/runner.py; InMemorySessionRepository, used by the full test

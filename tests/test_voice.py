@@ -84,3 +84,47 @@ def test_report_latency_reports_median_and_p95_per_stage():
 
 def test_report_latency_handles_no_turns():
     assert report_latency([]) == "no turns recorded"
+
+
+# --- T-039 Part 3: unusable audio degrades the turn, never kills the loop --
+
+def test_unusable_audio_does_not_crash_the_voice_loop(monkeypatch):
+    """Regression for the real T-038 Phase 2 finding: silence/background
+    noise/a hesitation makes the STT provider raise UnusableAudioError (a
+    real HTTP 422 from the Parakeet server in production), and this used to
+    propagate straight out of LocalVoiceLoop.turn() with nothing catching
+    it — on a phone line, an uncaught exception here is a dropped call. A
+    turn like this must degrade to a spoken apology and let the call
+    continue, not raise."""
+    monkeypatch.setenv("LAKEWOOD_INTERPRETER", "rule_based")
+    repo = InMemorySessionRepository()
+    call = PersistentChat.start(repo, "+12037588880", "VOICE", "+12035551234")
+    stt = FakeSTTProvider(default_transcript="")  # empty -> UnusableAudioError
+    loop = LocalVoiceLoop(call, stt, FakeTTSProvider(), FakeMic())
+
+    result = loop.turn()  # must not raise
+
+    assert result.transcript == ""
+    assert "didn't catch that" in result.reply.lower()
+    # The turn never reached the interpreter: no phantom mutation, no wasted
+    # confirmation-gate increment for an utterance that was never heard.
+    assert call.chat.session.order.lines == []
+
+
+def test_voice_loop_recovers_and_continues_after_unusable_audio(monkeypatch):
+    """The call must survive PAST the bad turn, not just avoid crashing on
+    it — the next real turn still reaches the real interpreter/domain."""
+    monkeypatch.setenv("LAKEWOOD_INTERPRETER", "rule_based")
+    repo = InMemorySessionRepository()
+    call = PersistentChat.start(repo, "+12037588880", "VOICE", "+12035551234")
+    stt = FakeSTTProvider(default_transcript="")
+    loop = LocalVoiceLoop(call, stt, FakeTTSProvider(), FakeMic())
+
+    loop.turn()  # unusable audio, degrades gracefully
+    stt.default_transcript = "large pepperoni"  # the customer tries again
+    result = loop.turn()
+
+    assert result.transcript == "large pepperoni"
+    line = call.chat.session.order.lines[0]
+    assert line.size == "LARGE"
+    assert any(t.name == "PEPPERONI" for t in line.toppings)

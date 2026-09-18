@@ -77,7 +77,11 @@ class TextInterpreter(Protocol):
 class ChatState:
     session: oe.Session
     last_line_id: Optional[str] = None
-    pending_clarification: Optional[list[dict]] = None  # search_menu hits
+    # Presentation/pronoun cache only. Session.pending_disambiguations is the
+    # one authoritative persisted clarification state. PersistentChat restores
+    # this cache from that state after reload; successful resolution and
+    # deterministic narrowing keep both synchronized.
+    pending_clarification: Optional[list[dict]] = None
     llm_history: list = field(default_factory=list)     # LLMInterpreter only
     tool_executor: object | None = field(default=None, repr=False)
 
@@ -106,17 +110,401 @@ _SIZE_VOCAB = sorted(
 # mention) — see _new_pizza's clause loop.
 _NEW_PIZZA_TOPPING_VOCAB = [p for p in _TOPPING_VOCAB if p != "cheese"]
 
-# Common branded/generic drink words -> a REAL, verified NON_PIZZA key. Not a
-# menu fabrication: "coke"/"soda" aren't SKUs on this menu, but "CAN" is, and
-# defaulting a bare drink mention to the smallest real size is the one
-# deliberate guess this interpreter makes — a low-stakes, trivially
-# correctable default, unlike guessing a pizza topping or price ever would
-# be. See docs/STATUS.md Known problems for the honest caveat.
-_DRINK_WORDS = {
-    "coke": "CAN", "pepsi": "CAN", "soda": "CAN", "pop": "CAN", "can": "CAN",
-    "two liter": "2LITER", "2 liter": "2LITER", "2-liter": "2LITER",
-    "bottle": "20OZ", "20 oz": "20OZ", "20oz": "20OZ",
+# T-039: a bare "can" used to be its own trigger here (the ordinary modal
+# verb in "can I get...", not a drink mention) and this dict was a second,
+# independently-maintained copy of orders.py's NON_PIZZA_ALIASES that never
+# got T-032's "two liter" > "coke" precedence fix, so "a two liter coke"
+# silently resolved to a can. Both bugs are closed the same way: drink
+# resolution now goes through oe.non_pizza_alias_hits — the one real alias
+# table and precedence rule search_menu itself uses — so this fast path can
+# never again drift out of sync with it.
+
+# T-039A: T-039's own fix (a `_NON_PIZZA_HEAD_WORDS` denylist of 12 literal
+# nouns) does not establish the general invariant — any product noun NOT on
+# that list ("nachos", "soup", "tacos", "appetizer", "garlic bread", or any
+# future menu item) still falls straight through to `_new_pizza`'s
+# unconditional default, because the denylist encodes "these known bad
+# words," never "positive evidence of pizza intent." Replaced entirely
+# (never expanded) by fail-closed intent parsing below — see ADR-017.
+
+# Ordinary connective/filler words that carry no product-identifying content
+# in a pizza-shorthand utterance. Deliberately narrow and reused nowhere else
+# a real ingredient/item word could hide — "please"/"can"/"i" etc. are never
+# menu-relevant, unlike a word this list must NOT include (any real topping,
+# size, or item name).
+_PIZZA_SHORTHAND_FILLER_RE = re.compile(
+    r"\b(a|an|the|and|with|please|i'd|id|like|get|want|order|of|only|"
+    r"just|some|me|can|i|for|on|that|this|side|other|actually|make|really|"
+    r"add|to|too)\b",
+    re.I)
+_QUANTITY_WORD_RE = re.compile(
+    r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
+# "pie" is common colloquial slang for pizza ("a plain pie, medium") — as
+# strong an explicit-pizza signal as the word "pizza" itself, not a shorthand
+# grammar token to be balanced against a residual. T-041: plural tolerance
+# ("three medium cheese pizzas") — \bpizza\b alone never matches "pizzas"
+# since \b requires a non-word boundary immediately after the "a", which a
+# trailing "s" is not; found live (docs/STATUS.md's T-041 entry) blocking
+# every plural multi-item pizza order.
+_PIZZA_WORD_RE = re.compile(r"\bpizzas?\b|\bpies?\b", re.I)
+# T-041: intensity words the domain's own add_modifier already accepts
+# (NORMAL/DOUBLE/TRIPLE/LITE/NONE — see TOOLS' add_modifier schema) but the
+# shorthand-residual grammar never consumed as evidence of pizza intent —
+# found live: "small cheese with triple pepperoni" (and even plain "extra
+# pepperoni") left "triple"/"extra" in the residual and wrongly blocked a
+# plainly pizza-shaped direct order. Negation ("no") and LITE ("light"/
+# "easy on") already have their own regexes below; this is the missing
+# NORMAL/DOUBLE/TRIPLE tier.
+_INTENSITY_WORD_RE = re.compile(r"\bextra\b|\bdouble\b|\btriple\b|\bquadruple\b", re.I)
+
+
+def _pizza_shorthand_residual(t: str) -> str:
+    """What's left of an utterance after removing every token a tight pizza-
+    shorthand grammar recognizes: sizes, toppings (the FULL vocabulary,
+    including bare "cheese" — "small cheese" is a valid order even though
+    `_new_pizza`'s own topping-scavenging loop deliberately excludes bare
+    "cheese" for pricing purposes), half/portion phrasing, negation/lite
+    modifiers, quantities, and ordinary connective filler. An empty residual
+    means the utterance is FULLY explained as pizza shorthand — "large
+    pepperoni" and "small cheese" both clear this with no "pizza" word ever
+    said. A non-empty residual ("nachos", "soup", "garden salad" — none of
+    them a recognized pizza token) is positive evidence of something ELSE,
+    and pizza creation must not be assumed from it.
+    """
+    residual = t
+    for pattern in (_HALF_A_HALF_B_RE, _HH_BY_NUMBER_RE, _ONE_HALF_RE,
+                    _OTHER_HALF_RE, _BARE_HALF_RE, _NEGATION_RE, _LITE_RE,
+                    _INTENSITY_WORD_RE, _QUANTITY_WORD_RE,
+                    _PIZZA_SHORTHAND_FILLER_RE):
+        residual = pattern.sub(" ", residual)
+    for phrase in _TOPPING_VOCAB:  # includes bare "cheese"; longest-first
+        residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
+    for phrase in _SIZE_VOCAB:
+        residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
+    # Clause punctuation (commas from "pepperoni, no onions") is not itself
+    # a product word — strip it before judging whether anything meaningful
+    # is left, or a bare leftover comma would wrongly count as "unexplained."
+    residual = re.sub(r"[^\w\s]", " ", residual)
+    return re.sub(r"\s+", " ", residual).strip()
+
+
+def _has_pizza_intent(text: str) -> bool:
+    """T-039A invariant: a request may create a pizza only when the
+    utterance provides positive, deterministic evidence the customer
+    intended a pizza — either the explicit word "pizza"/a recognized
+    gourmet pizza, or a fully-explained pizza-shorthand utterance (every
+    meaningful token is a size/topping/modifier/quantity/filler, nothing
+    left unaccounted for). Shared by BOTH interpreters' mutation boundary:
+    `RuleBasedInterpreter` gates `_new_pizza`/the bare-topping graft with it
+    directly; `LLMInterpreter` gates any model `add_item` call that would
+    create a pizza with the SAME function (see `_authorize_item_creation`
+    below) — one predicate, not two independently-drifting checks.
+    """
+    t = text.strip().lower()
+    if _PIZZA_WORD_RE.search(t):
+        return True
+    return _pizza_shorthand_residual(t) == ""
+
+
+# T-039B: stable, distinguishable authorization outcomes for `add_item` —
+# a retrieved candidate is evidence for clarification, never customer
+# consent by itself. Only the first three ever authorize a mutation.
+AUTH_DIRECT_UTTERANCE_EVIDENCE = "DIRECT_UTTERANCE_EVIDENCE"
+AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT = "UNIQUE_SUPPORTED_SEARCH_RESULT"
+AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE = "CUSTOMER_CONFIRMED_PENDING_CANDIDATE"
+AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED = "AMBIGUOUS_CANDIDATE_NOT_CONFIRMED"
+AUTH_UNSUPPORTED_ITEM_SUBSTITUTION = "UNSUPPORTED_ITEM_SUBSTITUTION"
+
+_AUTHORIZED_REASONS = {
+    AUTH_DIRECT_UTTERANCE_EVIDENCE,
+    AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT,
+    AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE,
 }
+
+
+def _size_supported_by_utterance(text: str, proposed_size: str | None) -> bool:
+    """A model may not manufacture a size attribute the customer never gave."""
+    if not proposed_size:
+        return True  # the domain tool will return SIZE_REQUIRED when applicable
+    proposed = oe.SIZE_ALIASES.get(str(proposed_size).strip().lower(),
+                                   str(proposed_size).strip().upper())
+    spoken = _find_vocab(text.lower(), _SIZE_VOCAB)
+    return bool(spoken and oe.SIZE_ALIASES.get(spoken, spoken.upper()) == proposed)
+
+
+def _words_present(phrase: str, text: str) -> bool:
+    words = re.findall(r"[a-z0-9]+", phrase.lower())
+    return bool(words) and all(re.search(rf"\b{re.escape(w)}\b", text.lower()) for w in words)
+
+
+def _search_query_supported_by_utterance(query: str, text: str) -> bool:
+    """The model's query is never evidence; every identifying query token
+    must already be present in the customer's current utterance."""
+    # T-041: the model's own query is a SEPARATE data source from the
+    # customer utterance (not something normalize_menu_text has already
+    # touched upstream) — normalize it here so "6 piece wings" and
+    # "six piece wings" are recognized as the same query shape either way.
+    query = oe.normalize_menu_text(query or "")
+    filler = {
+        "a", "an", "the", "i", "id", "i'd", "want", "like", "get", "give",
+        "me", "please", "order", "some", "one", "of", "menu", "item",
+    }
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower())
+             if w not in filler]
+    return bool(words) and all(re.search(rf"\b{re.escape(w)}\b", text.lower()) for w in words)
+
+
+def _item_hit_supported_by_utterance(hit: dict, text: str) -> bool:
+    """Deterministic customer-language evidence for the exact retrieved SKU."""
+    if hit.get("kind") == "gourmet":
+        number = hit.get("number")
+        numbered = bool(re.search(rf"(?:#|\bnumber\s*){number}\b", text.lower()))
+        return numbered or _words_present(hit.get("name", ""), text)
+    if hit.get("kind") != "item":
+        return False
+    name = hit.get("name", "")
+    if name == "CHEESE PIZZA":
+        return _has_pizza_intent(text)
+    if any(canon == name for _, canon in oe.non_pizza_alias_hits(text.lower())):
+        return True
+    words = name.lower().replace("-", " ").split()
+    encoded_size = None
+    identifying = []
+    for word in words:
+        canon = oe.SIZE_ALIASES.get(word)
+        if canon in ("SMALL", "LARGE"):
+            encoded_size = canon
+        else:
+            identifying.append(word)
+    if not identifying or not all(re.search(rf"\b{re.escape(w)}\b", text.lower())
+                                   for w in identifying):
+        return False
+    if encoded_size is None:
+        return True
+    spoken = _find_vocab(text.lower(), _SIZE_VOCAB)
+    return bool(spoken and oe.SIZE_ALIASES.get(spoken, spoken.upper()) == encoded_size)
+
+
+def _matching_search_hit(item_key: str, gourmet_number, search_hits: list[dict]):
+    for hit in search_hits:
+        if hit.get("kind") == "item" and hit.get("name") == item_key:
+            yield hit
+        elif (hit.get("kind") == "gourmet" and gourmet_number is not None
+              and hit.get("number") == gourmet_number):
+            yield hit
+
+
+def _select_pending_candidate(text: str, pending_candidates: list[dict]):
+    """T-039B: deterministically match a customer utterance against an
+    OUTSTANDING set of pending disambiguation candidates (item-kind hits
+    with a real menu `name`, e.g. "GARDEN SALAD SM"/"GARDEN SALAD LG"/
+    "SALAD SM"/"SALAD LG"). Never a guess: a candidate only counts as
+    matched when its own distinguishing words are literally present in the
+    utterance, and a trailing size abbreviation (SM/LG) only counts when it
+    agrees with a size word the utterance itself states.
+
+    Returns one of:
+      ("SELECTED", candidate)   — exactly one candidate is uniquely
+                                  supported ("the large garden salad" among
+                                  the four above -> GARDEN SALAD LG).
+      ("NARROWED", [candidates]) — the utterance narrows the set (e.g. names
+                                  the GARDEN family) but more than one
+                                  candidate remains equally supported,
+                                  typically because a further attribute
+                                  (size) is still unstated ("the garden
+                                  one" -> both GARDEN SALAD SM/LG).
+      ("NO_MATCH", None)        — nothing in the utterance matches any
+                                  candidate at all.
+
+    Prefers the MOST SPECIFIC candidate name a customer's words fully cover
+    ("garden salad" beats bare "salad" for an utterance mentioning both)
+    over a partial/generic one, so a customer who says "garden" is never
+    silently routed to the plain SALAD SKU just because "salad" alone is
+    also, trivially, a substring of their own words.
+
+    A bare size-only reply ("large", with no type word at all) selects
+    uniquely when EVERY remaining candidate already names the same item
+    family (already narrowed to just a size choice by an earlier turn,
+    e.g. "the garden one" -> GARDEN SALAD SM/LG -> "large") — otherwise a
+    bare size alone is not evidence for which family it belongs to.
+    """
+    t = text.strip().lower()
+    utterance_size = _find_vocab(t, _SIZE_VOCAB)
+    utterance_size_canon = oe.SIZE_ALIASES.get(utterance_size) if utterance_size else None
+
+    parsed = []  # (type_words, cand_size, hit)
+    for h in pending_candidates:
+        if h.get("kind") != "item" or not h.get("name"):
+            continue
+        words = h["name"].lower().replace("-", " ").split()
+        cand_size, type_words = None, []
+        for w in words:
+            canon = oe.SIZE_ALIASES.get(w)
+            if canon in ("SMALL", "LARGE"):
+                cand_size = canon
+            else:
+                type_words.append(w)
+        if not type_words:
+            continue
+        parsed.append((tuple(type_words), cand_size, h))
+
+    if not parsed:
+        return "NO_MATCH", None
+
+    families = {p[0] for p in parsed}
+    if len(families) == 1 and utterance_size_canon:
+        same_size = [h for _, sz, h in parsed if sz == utterance_size_canon]
+        if len(same_size) == 1:
+            return "SELECTED", same_size[0]
+
+    scored = [(sum(1 for w in tw if re.search(rf"\b{re.escape(w)}\b", t)), len(tw), sz, h)
+             for tw, sz, h in parsed]
+    scored = [s for s in scored if s[0] > 0]
+    if not scored:
+        return "NO_MATCH", None
+
+    max_hits = max(s[0] for s in scored)
+    top = [s for s in scored if s[0] == max_hits]
+    # A FULLY-named candidate (every one of its own words present) beats a
+    # partial one at the same hit count.
+    full = [s for s in top if s[0] == s[1]]
+    pool = full if full else top
+
+    if utterance_size_canon:
+        size_filtered = [s for s in pool if s[2] is None or s[2] == utterance_size_canon]
+        if size_filtered:
+            pool = size_filtered
+
+    candidates = [s[3] for s in pool]
+    if len(candidates) == 1:
+        return "SELECTED", candidates[0]
+    return "NARROWED", candidates
+
+
+def _narrow_pending_disambiguations(session: "oe.Session", text: str) -> None:
+    """T-041: the LLM-path counterpart of RuleBasedInterpreter's own
+    NARROWED handling in `_resolve_clarification` — found missing by the
+    T-039 live N=3 gate (NONPIZZA-006: "I want a salad." -> "The garden
+    one." -> "Large." failed 1 of 3 live runs with an unnecessary
+    `transfer_to_human`, passed the other 2 only by the accident of the
+    model happening to issue an extra `search_menu` call that incidentally
+    registered an already-narrowed candidate set).
+
+    RuleBasedInterpreter always re-parses the customer's own utterance
+    against `session.pending_disambiguations` every turn and persists a
+    NARROWED result via `oe._narrow_disambiguation` (see its own
+    `_resolve_clarification`). The LLM path only ever reached
+    `_select_pending_candidate` from INSIDE `_authorize_item_creation` —
+    i.e. only on a turn where the model happened to call `add_item`. A
+    turn where the model just asks its own clarifying question (no tool
+    call at all) left `pending_disambiguations` completely untouched,
+    so a later bare-attribute reply ("Large.") had to resolve against the
+    ORIGINAL, wider, multi-family candidate set — which
+    `_select_pending_candidate` correctly refuses to guess across.
+
+    This function closes that gap the same way: deterministic,
+    customer-utterance-only, run once per turn regardless of what the
+    model does this turn, and NEVER selects/authorizes a mutation by
+    itself (that stays `_authorize_item_creation`'s job alone) — it only
+    ever narrows one ambiguous set down to a smaller ambiguous set. A
+    mutation to `pending_disambiguations` (clarification bookkeeping), not
+    the cart — the same distinction `PersistentChat`'s own persistence
+    fingerprint already treats as separate from an authorized `add_item`.
+    """
+    for entry in session.pending_disambiguations:
+        item_cands = [c for c in entry.get("candidates", []) if c.get("kind") == "item"]
+        if len(item_cands) < 2:
+            continue
+        outcome, narrowed = _select_pending_candidate(text, item_cands)
+        if outcome == "NARROWED" and len(narrowed) < len(item_cands):
+            oe._narrow_disambiguation(session, entry["candidates"], narrowed)
+
+
+def _authorize_item_creation(item_key: str, size, gourmet_number, second_gourmet_number,
+                             text: str, search_hits: list[dict],
+                             pending_disambiguations: list[dict]) -> str:
+    """T-039A/T-039B: the LLM-path mutation boundary for `add_item` — covers
+    a substituted PIZZA just as much as a substituted valid NON_PIZZA SKU
+    (a model calling `add_item(item="CAN")` for "a small garden salad" is
+    the same defect class as substituting CHEESE PIZZA, just a different
+    valid item). Returns a stable reason code (`_AUTHORIZED_REASONS`
+    membership decides whether the mutation proceeds), never a bare bool,
+    so tests/traces can tell WHY.
+
+    Pizza (`item_key` is PIZZA/CHEESE PIZZA, or a gourmet number given):
+    `_has_pizza_intent` (the same predicate the rule-based path is gated
+    by) is direct evidence; a matching gourmet/CHEESE-PIZZA search hit this
+    turn is a unique search result — but ONLY if that hit's own search call
+    was not itself `needs_disambiguation=True` (`h["_ambiguous"]`) AND both
+    the model-controlled query and the exact returned SKU are independently
+    supported by the customer's current words. A candidate retrieved under
+    ambiguity, or by an unsupported query, is evidence for clarification,
+    never customer consent. This is the exact bug T-039B closes: T-039A's
+    guard flattened every hit into one list and treated retrieval itself as
+    authorization.
+
+    Any other (non-pizza) item: `oe.non_pizza_alias_hits` is direct
+    evidence; an unambiguous search hit this turn naming that exact item
+    is a unique result, same ambiguity check as above.
+
+    If neither direct evidence nor an unambiguous hit authorizes the call,
+    the last legitimate path is an EXPLICIT customer selection from
+    whatever is actually outstanding — `pending_disambiguations` is
+    server-owned F17 state (`chat.session.pending_disambiguations`), never
+    anything the model supplies; `_select_pending_candidate` checks THIS
+    utterance's own words against it. The model can request a selection,
+    it can never manufacture one.
+    """
+    # T-041: normalize the customer's own utterance ONCE, at this single
+    # LLM-path evidence entry point — the exact same shared normalizer
+    # RuleBasedInterpreter.interpret applies at its own entry point, so a
+    # spelled number/quantity-piece phrase ("number ten", "six piece wings")
+    # is real evidence on BOTH paths, never just one. Idempotent, so any
+    # sub-check below normalizing again is harmless.
+    text = oe.normalize_menu_text(text)
+    creates_pizza = item_key in ("PIZZA", "CHEESE PIZZA") \
+        or gourmet_number is not None or second_gourmet_number is not None
+
+    if creates_pizza:
+        if (gourmet_number is None and second_gourmet_number is None
+                and _has_pizza_intent(text)
+                and _size_supported_by_utterance(text, size)):
+            return AUTH_DIRECT_UTTERANCE_EVIDENCE
+    else:
+        if not item_key:
+            return AUTH_DIRECT_UTTERANCE_EVIDENCE  # nothing to authorize; BAD_ARGS handles this
+        if any(canon == item_key for _, canon in oe.non_pizza_alias_hits(text.lower())):
+            return AUTH_DIRECT_UTTERANCE_EVIDENCE
+
+    matching_hits = list(_matching_search_hit(item_key, gourmet_number, search_hits))
+    for hit in matching_hits:
+        if hit.get("_ambiguous"):
+            continue
+        if not _search_query_supported_by_utterance(hit.get("_search_query", ""), text):
+            continue
+        if not _item_hit_supported_by_utterance(hit, text):
+            continue
+        if creates_pizza and not _size_supported_by_utterance(text, size):
+            continue
+        if second_gourmet_number is not None:
+            second = [h for h in search_hits if h.get("kind") == "gourmet"
+                      and h.get("number") == second_gourmet_number
+                      and not h.get("_ambiguous")
+                      and _search_query_supported_by_utterance(h.get("_search_query", ""), text)
+                      and _item_hit_supported_by_utterance(h, text)]
+            if not second:
+                continue
+        return AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT
+
+    for entry in pending_disambiguations:
+        outcome, selected = _select_pending_candidate(text, entry.get("candidates", []))
+        if outcome == "SELECTED" and selected.get("name") == item_key:
+            return AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE
+
+    ambiguous_hit_for_this_item = any(h.get("_ambiguous") for h in matching_hits)
+    if ambiguous_hit_for_this_item:
+        return AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED
+    return AUTH_UNSUPPORTED_ITEM_SUBSTITUTION
 
 _CONFIRM_RE = re.compile(
     r"\b(yes|yeah|yep|sure).{0,20}\b(place|confirm|go ahead)\b"
@@ -172,10 +560,17 @@ def _find_vocab(text: str, vocab: list[str]) -> Optional[str]:
 
 
 def _find_drink(text: str) -> Optional[str]:
-    for word, key in _DRINK_WORDS.items():
-        if re.search(rf"\b{re.escape(word)}\b", text):
-            return key
-    return None
+    hits = oe.non_pizza_alias_hits(text)
+    return hits[0][1] if hits else None
+
+
+def _clean_query(t: str) -> str:
+    """Strip conversational filler before handing text to search_menu — the
+    real menu lookup, never a guess. Shared by every branch that falls back
+    to a real lookup (the plain fallback and the pizza-intent gate) so there
+    is one query-cleaning rule, not copies that could drift apart."""
+    query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
+    return re.sub(r"\s+", " ", query).strip() or t
 
 
 class RuleBasedInterpreter:
@@ -191,8 +586,13 @@ class RuleBasedInterpreter:
         # Strip sentence punctuation but keep commas — clause-splitting in
         # _new_pizza depends on them to scope a half-modifier to the right
         # topping ("pepperoni, mushroom only on one half" must not leak
-        # "one half" onto pepperoni).
-        t = re.sub(r"[.!?]+", "", text.strip().lower())
+        # "one half" onto pepperoni). T-041: normalize spelled numbers/
+        # quantity-piece phrasing ONCE here, at intake, so every downstream
+        # regex (_HH_BY_NUMBER_RE's digit-only half-by-number match,
+        # _select_pending_candidate's "6pc" word check) sees the same
+        # canonical form real speech and typed text both need — one
+        # normalizer, shared with search_menu (see oe.normalize_menu_text).
+        t = oe.normalize_menu_text(re.sub(r"[.!?]+", "", text.strip().lower()))
         sess = chat.session
 
         # 0. Answering a pending clarification from the previous turn.
@@ -241,15 +641,30 @@ class RuleBasedInterpreter:
         if drink_key and not size:
             return Interpretation(calls=[ToolCall("add_item", {"item": drink_key})])
 
-        # 8. Size (+ optional toppings) — start a new pizza.
+        # 8. Size (+ optional toppings) — start a new pizza, but ONLY when
+        # the utterance carries positive, deterministic evidence of pizza
+        # intent (T-039A — replaces T-039's finite noun denylist, which
+        # could never cover an unlisted product noun like "nachos"/"soup").
+        # "small" is also a real GARDEN SALAD SM size; a size word alone is
+        # not evidence. Never guess: route to a real menu lookup instead.
         if size:
-            return self._new_pizza(chat, t, size)
+            if _has_pizza_intent(t):
+                return self._new_pizza(chat, t, size)
+            return Interpretation(calls=[
+                ToolCall("search_menu", {"query": _clean_query(t)})])
 
         # 9. Bare topping mention on an already-open pizza line — including
         # negation/lite said as its own follow-up turn ("no onions" after
-        # the pizza already exists), not just at creation time.
+        # the pizza already exists), not just at creation time. Same
+        # invariant: an utterance that also carries an unexplained product
+        # noun ("one calzone with mozzarella and ricotta") must never graft
+        # onto the open line just because it happens to contain a real
+        # topping word too — route to a real menu lookup instead.
         topping = _find_vocab(t, _TOPPING_VOCAB)
         if topping and chat.last_line_id:
+            if not _has_pizza_intent(t):
+                return Interpretation(calls=[
+                    ToolCall("search_menu", {"query": _clean_query(t)})])
             # Canonicalize BEFORE comparing against Topping.name (always
             # stored canonical/uppercase) — _find_vocab returns the raw
             # lowercase vocab phrase, which add_modifier alone would resolve
@@ -264,10 +679,8 @@ class RuleBasedInterpreter:
                 chat, chat.last_line_id, topping, portion, intensity))
 
         # 10. Fall through to a real menu lookup — never guess an item.
-        query = re.sub(r"\b(give me|i want|i'd like|can i get|a|an|the)\b", " ", t)
-        query = re.sub(r"\s+", " ", query).strip() or t
-        return Interpretation(calls=[ToolCall("search_menu", {"query": query})],
-                              say=None)
+        return Interpretation(calls=[
+            ToolCall("search_menu", {"query": _clean_query(t)})], say=None)
 
     # -- helpers --------------------------------------------------------
 
@@ -447,7 +860,30 @@ class RuleBasedInterpreter:
                 if c.get("kind") == "gourmet" and c.get("number") == n:
                     return Interpretation(say=(
                         f"Got it, #{n} {GOURMET_ROUND.get(n, '')}. What size?"))
+
+        # T-039B: item-kind candidates ("GARDEN SALAD SM"/"LG", "SALAD SM"/
+        # "LG") resolve via deterministic word/size matching against THIS
+        # utterance — never the old raw substring-of-the-canonical-name
+        # check below, which could never match "the large garden salad"
+        # against "garden salad lg" (the customer says "large," never
+        # "lg"). Shared with the LLM path's own mutation boundary
+        # (_select_pending_candidate) — one matcher, not two.
+        item_cands = [c for c in cands if c.get("kind") == "item"]
+        if item_cands:
+            outcome, selected = _select_pending_candidate(t, item_cands)
+            if outcome == "SELECTED":
+                return Interpretation(calls=[ToolCall("add_item", {"item": selected["name"]})])
+            if outcome == "NARROWED":
+                # Still ambiguous, but narrowed (e.g. to the GARDEN family) —
+                # keep ONLY the narrowed set open, and ask specifically for
+                # size since that's what's left to distinguish among them.
+                oe._narrow_disambiguation(chat.session, cands, selected)
+                chat.pending_clarification = selected
+                return Interpretation(say="What size would you like?")
+
         for c in cands:
+            if c.get("kind") == "item":
+                continue  # handled above; never fall through to a raw substring guess
             if c.get("kind") in t or (c.get("name", "").lower() in t):
                 if c["kind"] == "gourmet":
                     return Interpretation(say="What size would you like?")
@@ -456,8 +892,7 @@ class RuleBasedInterpreter:
                         return Interpretation(calls=[ToolCall("add_modifier", {
                             "line_id": chat.last_line_id, "modifier": c["name"]})])
                     return Interpretation(say="Which pizza should that go on?")
-                if c["kind"] == "item":
-                    return Interpretation(calls=[ToolCall("add_item", {"item": c["name"]})])
+        chat.pending_clarification = cands
         return None
 
 
@@ -588,6 +1023,14 @@ def _state_context(session: oe.Session) -> str:
     return "\n".join(parts)
 
 
+# T-039A Part 4: a provider/network failure or an internal tool-loop-
+# exhaustion diagnostic must never be spoken verbatim (see `interpret()`'s
+# except block below) — a stable, generic apology, with no interpolated
+# exception text. The real detail stays available via `last_provider_error`
+# for logs/traces.
+_PROVIDER_TROUBLE_REPLY = "Sorry, I'm having trouble right now — could you repeat that?"
+
+
 class LLMInterpreter:
     """Execute the shared tool contract against a staged in-memory session.
 
@@ -608,11 +1051,16 @@ class LLMInterpreter:
         staged = copy.deepcopy(chat)
         staged.llm_history.append({"role": "user", "content": text})
         try:
-            result = self._interpret_staged(staged)
+            result = self._interpret_staged(staged, text)
         except ProviderCallError as e:
+            # T-039A Part 4: the exception text (network/HTTP detail, or the
+            # internal "tool loop exceeded N rounds" diagnostic below) is
+            # kept for logs/traces via last_provider_error, but must never be
+            # interpolated into what gets spoken — a customer hearing raw
+            # provider/internal diagnostic text is exactly the leak class
+            # this task closes.
             self.last_provider_error = str(e)
-            return Interpretation(
-                say=f"Sorry, I'm having trouble right now — could you repeat that? ({e})")
+            return Interpretation(say=_PROVIDER_TROUBLE_REPLY)
         # Keep the authoritative Session identity used by chat/eval callers.
         chat.session.__dict__.update(staged.session.__dict__)
         chat.last_line_id = staged.last_line_id
@@ -620,9 +1068,16 @@ class LLMInterpreter:
         chat.llm_history = staged.llm_history
         return result
 
-    def _interpret_staged(self, chat: ChatState) -> Interpretation:
+    def _interpret_staged(self, chat: ChatState, text: str) -> Interpretation:
+        # T-041: deterministic, customer-evidence-only narrowing of any
+        # outstanding pending_disambiguations, run once per turn regardless
+        # of what tool call (if any) the model makes — see
+        # _narrow_pending_disambiguations' own docstring for the exact
+        # asymmetry this closes (NONPIZZA-006 in the T-039 live N=3 gate).
+        _narrow_pending_disambiguations(chat.session, oe.normalize_menu_text(text))
         executed = []
         last_new_line_id = None
+        search_hits_this_turn: list[dict] = []
         for _ in range(12):
             system = _SYSTEM_PROMPT + "\n\nCurrent order state:\n" + _state_context(chat.session)
             resp = self.provider.complete(system, chat.llm_history, _TOOL_SCHEMAS)
@@ -639,12 +1094,39 @@ class LLMInterpreter:
                 fn = TOOLS.get(name)
                 schema = next((t["input_schema"] for t in _TOOL_SCHEMAS
                                if t["name"] == name), None)
+                auth_reason = None
+                if name == "add_item" and fn is not None and schema is not None \
+                        and _valid_tool_args(args, schema, _MODEL_HIDDEN_ARGS.get(name, set())):
+                    auth_reason = _authorize_item_creation(
+                        (args.get("item") or "").strip().upper(), args.get("size"),
+                        args.get("gourmet_number"), args.get("second_gourmet_number"),
+                        text, search_hits_this_turn, chat.session.pending_disambiguations)
                 if fn is None:
+                    # T-039A Part 4: the raw tool name a model invented is
+                    # diagnostic detail (kept in the structured result for
+                    # logs/traces), never customer dialogue — masked at the
+                    # single funnel, chat.py::_customer_safe_error_message.
                     r = {"status": "error", "code": "UNKNOWN_TOOL",
                          "message": f"{name!r} is not a real tool."}
                 elif not _valid_tool_args(args, schema, _MODEL_HIDDEN_ARGS.get(name, set())):
                     r = {"status": "error", "code": "BAD_ARGS",
                          "message": "Tool arguments do not match the permitted schema."}
+                elif name == "add_item" and auth_reason not in _AUTHORIZED_REASONS:
+                    # T-039A/T-039B: the mutation boundary — a model calling
+                    # add_item for an item the customer's own utterance gives
+                    # no positive evidence for, that isn't an UNAMBIGUOUS
+                    # candidate this turn's own search_menu already returned,
+                    # and that this turn's own text doesn't deterministically
+                    # select from whatever is actually outstanding, never
+                    # reaches the real tool. Same predicate that gates
+                    # RuleBasedInterpreter's _new_pizza; this is its LLM-path
+                    # enforcement point (see _authorize_item_creation). The
+                    # reason code IS the error code — stable for tests/traces.
+                    r = {"status": "error", "code": auth_reason,
+                         "message": ("Could you tell me which one you'd like?"
+                                    if auth_reason == AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED
+                                    else "That doesn't match what was asked for — "
+                                         "could you clarify what you'd like?")}
                 else:
                     args = {k: v for k, v in args.items()
                             if k not in _MODEL_HIDDEN_ARGS.get(name, set())}
@@ -655,14 +1137,35 @@ class LLMInterpreter:
                         r = (chat.tool_executor(name, args, fn, chat.session)
                              if chat.tool_executor is not None else fn(chat.session, **args))
                     except (TypeError, ValueError) as e:
+                        # T-039A Part 4: raw Python exception text (e.g. an
+                        # unexpected-keyword-argument message) is diagnostic
+                        # detail, not customer dialogue — same masked funnel
+                        # as UNKNOWN_TOOL above.
                         r = {"status": "error", "code": "BAD_ARGS", "message": str(e)}
 
                 executed.append({"tool": name, "args": args, "result": r})
+                if name == "add_item" and auth_reason is not None:
+                    r["authorization_reason"] = auth_reason
                 if name == "add_item" and r.get("status") == "ok":
                     last_new_line_id = r["line_id"]
                     chat.last_line_id = last_new_line_id
+                if name in {"add_item", "add_modifier", "decline_item"} \
+                        and r.get("status") == "ok":
+                    chat.pending_clarification = (
+                        list(chat.session.pending_disambiguations[-1]["candidates"])
+                        if chat.session.pending_disambiguations else None)
                 if name == "search_menu" and r.get("status") == "ok":
                     chat.pending_clarification = r.get("results", [])
+                    # T-039B: tag provenance per hit — a candidate retrieved
+                    # under needs_disambiguation=True must never authorize a
+                    # mutation the same way a unique result does (the exact
+                    # gap _authorize_item_creation closes). Copies each hit
+                    # dict rather than mutating orders.py's own returned
+                    # objects in place.
+                    ambiguous = r.get("needs_disambiguation", False)
+                    search_hits_this_turn.extend(
+                        {**h, "_ambiguous": ambiguous, "_search_query": args.get("query", "")}
+                        for h in r.get("results", []))
                 tool_result_blocks.append({
                     "type": "tool_result", "tool_use_id": tu["id"],
                     "content": json.dumps(r, default=str),
