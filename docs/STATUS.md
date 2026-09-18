@@ -3,10 +3,10 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-17 on Windows/offline (T-039A — reopened T-039,
-generalized the no-substitution guard), branch `codex/parakeet-stt`. Real
-GPU numbers in the T-038 Phase 2 entry below were measured separately on
-the owner's Windows/WSL hardware and are unaffected by this task.
+Last verified: 2026-09-18 on Windows/offline (T-039B — retrieval is not
+customer authorization), branch `codex/parakeet-stt`. Real GPU numbers in
+the T-038 Phase 2 entry below were measured separately on the owner's
+Windows/WSL hardware and are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -21,6 +21,64 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-039B done, 2026-09-18: T-039A's LLM-path mutation-boundary guard
+(`_item_creation_is_authorized`) treated ANY `search_menu` hit returned
+during the same turn as authorization for a matching `add_item` — even a
+hit registered under `needs_disambiguation=True`, and even when the
+model's own search query had no support in the customer's utterance at
+all.** Reproduced directly: with the customer saying only "I want a
+salad," a model calling `search_menu("wrap")` then `add_item("WRAP")` was
+authorized and added a $12.00 wrap; the same shape worked for a
+`search_menu("coke")`→`add_item("CAN")` substitution and a
+`search_menu("bruschetta")`→gourmet-pizza substitution. A retrieved
+candidate was being treated as customer consent instead of evidence for a
+clarifying question.
+
+**Fix: `_authorize_item_creation` replaces `_item_creation_is_authorized`
+and returns a stable reason code, not a bare boolean** — only
+`AUTH_DIRECT_UTTERANCE_EVIDENCE`, `AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`,
+and `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` authorize the mutation.
+`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT` now requires the hit to not have
+been returned ambiguously AND both the model's search query and the exact
+retrieved SKU to be independently supported by the customer's own words
+(`_search_query_supported_by_utterance`/`_item_hit_supported_by_utterance`)
+— a model can no longer manufacture authorization by choosing a favorable
+query. `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` deterministically
+matches an explicit follow-up ("the large garden salad") against the
+server-owned `session.pending_disambiguations` set
+(`_select_pending_candidate`, shared by both interpreters), including
+narrowing a family ("the garden one") before a later bare size ("large")
+resolves it against the now-narrowed set. Anything else returns
+`AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED` or
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` and the mutation never reaches the
+real tool. Full mechanism and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+
+**Same-task persistence fix:** `search_menu` was treated as read-only by
+`PersistentChat`, but an ambiguous result mutates
+`session.pending_disambiguations`, and that mutation was never saved — a
+dropped call or reload between the ambiguous search and the customer's
+next turn silently lost the pending clarification. `PersistentChat.run_turn`
+now fingerprints `session.unresolved_lookups`/`pending_disambiguations`
+before and after the turn and saves through the existing repository path
+only when that fingerprint actually changes; a harmless unique/miss search
+still writes nothing. `PersistentChat._chat_for` restores the presentation
+cache (`ChatState.pending_clarification`) from the authoritative,
+just-loaded `session.pending_disambiguations` on every load/resume, so a
+recovered session's next turn resolves against the real reloaded candidate
+set, proven with a real `PersistentChat` + `InMemorySessionRepository`
+round trip, not serialization helpers alone.
+
+Offline: full suite 561 passed / 2 skipped / 2 xfailed (up from 546 — 15
+new tests in `tests/test_t039b_candidate_authorization.py`, zero
+regressions); `validate` 81/81 (was 78/78 — 3 new corpus cases, no
+regressions); rule-based ratchet 50/81 (was 46/78) — +1 genuine flip
+(`NONPIZZA-005`'s second turn, "the small one," now resolves via
+`_select_pending_candidate` instead of the old raw substring check that
+could never match a spoken size word against an abbreviated SM/LG suffix)
++3 new cases, all passing as authored; pricing parity 50/50 unchanged.
+Full arithmetic: `tests/test_evals.py`'s baseline comment.
 
 **T-039A done, 2026-09-17 (reopened T-039, same day): T-039's fix was a
 12-word denylist, not the general invariant it claimed.** Confirmed
@@ -750,23 +808,44 @@ the OpenAI T-013c section further below is preserved as-is.
 ## Latest verification
 
 ```
-python -m pytest --no-header (2026-09-17, T-039A)          → 546 passed, 2 skipped (live-Postgres-
+python -m pytest --no-header (2026-09-18, T-039B)          → 561 passed, 2 skipped (live-Postgres-
                                                            only, no LAKEWOOD_POSTGRES_TEST_DSN in
                                                            this environment), 2 xfailed (pre-
-                                                           existing, unrelated). Up from 520 before
-                                                           this task — 26 new tests; zero
-                                                           regressions.
-python evals/runner.py validate                          → 78/78, unchanged (label corrections
-                                                           only, no new cases this task)
-python evals/runner.py score --adapter rule_based         → 46/78 (was 41/78) — see "T-039A done"
-                                                           above for the honest per-flip breakdown
+                                                           existing, unrelated). Up from 546 before
+                                                           this task — 15 new tests in
+                                                           tests/test_t039b_candidate_authorization.py;
+                                                           zero regressions.
+python evals/runner.py validate                          → 81/81 (was 78/78 — 3 new corpus cases,
+                                                           no regressions)
+python evals/runner.py score --adapter rule_based         → 50/81 (was 46/78) — see "T-039B done"
+                                                           above for the honest ratchet arithmetic
 python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
 python evals/runner.py score --adapter llm (N=3, live)    → still BLOCKED — no EXPLABS_API_KEY in
                                                            this environment; this task touched no
                                                            LLMInterpreter prompt/tool-description/
-                                                           provider surface. T-032's 53/54/56
+                                                           provider surface (the mutation-boundary
+                                                           guard only ever REJECTS an unauthorized
+                                                           call closer to what the system prompt
+                                                           already asks for). T-032's 53/54/56
                                                            (mean 54.33) band is still the current
                                                            live baseline.
+```
+
+Earlier verification (2026-09-17, T-039A), still valid and superseded only by
+the above where they overlap:
+
+```
+python -m pytest --no-header (2026-09-17, T-039A)          → 546 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 520 before
+                                                           that task — 26 new tests; zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78, unchanged (label corrections
+                                                           only, no new cases that task)
+python evals/runner.py score --adapter rule_based         → 46/78 (was 41/78) — see "T-039A done"
+                                                           above for the honest per-flip breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
 ```
 
 Earlier verification (2026-09-17, T-039), still valid and superseded only by

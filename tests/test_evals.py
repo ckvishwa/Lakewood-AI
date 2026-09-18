@@ -72,12 +72,46 @@ CASES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # pizza-word evidence for "a plain pie, medium") which recovered MOD-014,
 # CONFIRM-002, and SLANG-002 — net 46/78.
 #
+# Raised to 50/81 on 2026-09-18 (T-039B: retrieval is not customer
+# authorization). T-039A's `_item_creation_is_authorized` treated ANY
+# search_menu hit returned this turn as authorization to add_item, even a
+# hit returned under needs_disambiguation=True, and even when the model's
+# own search query had no support in the customer's utterance — a model
+# could say "I want a salad", silently search "wrap"/"coke"/a gourmet
+# number, and add that unrelated valid SKU, all inside one authorized-
+# looking turn. Replaced with `_authorize_item_creation`, which returns a
+# stable reason code (AUTH_DIRECT_UTTERANCE_EVIDENCE /
+# AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT / AUTH_CUSTOMER_CONFIRMED_PENDING_
+# CANDIDATE authorize; AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED /
+# AUTH_UNSUPPORTED_ITEM_SUBSTITUTION do not) and requires, per hit, that the
+# hit was not itself ambiguous AND that both the search query and the exact
+# returned SKU are independently supported by the customer's own words. A
+# real explicit follow-up selection ("the large garden salad") now also
+# resolves deterministically against the server-owned
+# `session.pending_disambiguations` set via `_select_pending_candidate` —
+# shared by both interpreters — including narrowing a family ("the garden
+# one") before a later bare size ("large") resolves it. `search_menu`
+# ambiguity registration/narrowing/clearing is also now correctly detected
+# as a persistence-worthy mutation of authoritative clarification state
+# (`PersistentChat._clarification_fingerprint`), so a dropped call between
+# an ambiguous search and the customer's next turn no longer loses the
+# pending candidates. 3 new corpus cases added
+# (`evals/cases/non_pizza_items.yaml`: NONPIZZA-006/007/008 — family
+# narrowing, the adversarial unsupported-search shape, and outside-pending-
+# set rejection), all 3 pass under the real rule-based interpreter as
+# authored. Net: 46 (T-039A baseline) + 1 genuine flip (NONPIZZA-005's
+# second turn, "the small one," now resolves via `_select_pending_candidate`
+# instead of the old raw substring check that could never match a spoken
+# size word against a candidate's abbreviated SM/LG suffix) + 3 new passing
+# cases = 50/81. Full mechanism and evidence:
+# `docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+#
 # Raise this number ONLY after running the real command and confirming the
 # new count:
 #     python evals/runner.py score --adapter rule_based
 # Never lower it, and never raise it to a number you haven't actually
 # observed — either of those defeats the entire point of this gate.
-RULE_BASED_BASELINE = 46
+RULE_BASED_BASELINE = 50
 
 
 def test_all_golden_labels_are_valid():
@@ -88,7 +122,7 @@ def test_all_golden_labels_are_valid():
 
 def test_corpus_is_growing():
     """Guardrail against the corpus quietly rotting. Raise as it grows."""
-    assert len(_load(CASES)) >= 78
+    assert len(_load(CASES)) >= 81
 
 
 def test_rule_based_interpreter_meets_baseline():

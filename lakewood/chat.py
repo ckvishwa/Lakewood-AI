@@ -23,6 +23,7 @@ provider.
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from dataclasses import dataclass, field
@@ -202,7 +203,31 @@ class PersistentChat:
         # Functions are immutable under deepcopy; unlike a bound method, this
         # closure retains the live application/repository when LLMInterpreter
         # deep-copies ChatState for its staged protocol.
-        return ChatState(session, tool_executor=lambda name, args, fn, staged: self._executor(name, args, fn, staged))
+        pending = (list(session.pending_disambiguations[-1]["candidates"])
+                   if session.pending_disambiguations else None)
+        return ChatState(
+            session,
+            pending_clarification=pending,
+            tool_executor=lambda name, args, fn, staged: self._executor(name, args, fn, staged),
+        )
+
+    @staticmethod
+    def _clarification_fingerprint(session: oe.Session) -> str:
+        """Stable snapshot of authoritative clarification state only.
+
+        A nominally read-only lookup should not force a repository write when
+        it changed nothing.  Conversely, search_menu misses/ambiguities and
+        deterministic candidate narrowing are real state mutations and must
+        survive a dropped call.
+        """
+        return json.dumps({
+            "unresolved_lookups": session.unresolved_lookups,
+            "pending_disambiguations": [
+                {"query": e["query"], "candidates": e["candidates"],
+                 "key": sorted(e["key"]), "ask_count": e["ask_count"]}
+                for e in session.pending_disambiguations
+            ],
+        }, sort_keys=True)
 
     @classmethod
     def start(cls, repo: SessionRepository, inbound_did: str, call_id: str,
@@ -232,7 +257,12 @@ class PersistentChat:
     def run_turn(self, interpreter: TextInterpreter, text: str, debug: bool = False) -> "TurnResult":
         if self.chat is None:
             raise RuntimeError("resume must be accepted or declined before a customer turn")
-        return run_turn(self.chat, interpreter, text, debug=debug)
+        before = self._clarification_fingerprint(self.chat.session)
+        result = run_turn(self.chat, interpreter, text, debug=debug)
+        after = self._clarification_fingerprint(self.chat.session)
+        if after != before:
+            save_progress(self.repo, self.chat.session)
+        return result
 
 
 def _format_hit_name(h: dict) -> str:
@@ -440,6 +470,11 @@ def run_turn(chat: ChatState, interpreter: TextInterpreter, text: str,
             chat.last_line_id = last_new_line_id
         if r.get("status") == "error" or (call.tool == "search_menu" and r.get("status") == "ok"):
             break  # let _finish_turn build the clarification/refusal reply
+        if call.tool in {"add_item", "add_modifier", "decline_item"} \
+                and r.get("status") == "ok":
+            chat.pending_clarification = (
+                list(chat.session.pending_disambiguations[-1]["candidates"])
+                if chat.session.pending_disambiguations else None)
 
     return _finish_turn(chat, made, debug)
 

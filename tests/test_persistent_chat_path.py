@@ -85,10 +85,10 @@ def test_llm_staged_mutation_is_saved_through_the_same_executor():
     assert reloaded is not None and len(reloaded.order.lines) == 1
 
 
-def test_llm_read_only_tool_does_not_write_a_session():
+def test_llm_harmless_read_only_tool_does_not_write_a_session():
     repo = InMemorySessionRepository()
     call = _start(repo, "LLM-READ")
-    call.run_turn(LLMInterpreter(_FakeProvider([_tool("search_menu", {"query": "wings"})])), "wings")
+    call.run_turn(LLMInterpreter(_FakeProvider([_tool("search_menu", {"query": "wrap"})])), "wrap")
     assert repo.load_session("STORE-001", "LLM-READ") is None
 
 

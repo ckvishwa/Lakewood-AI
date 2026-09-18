@@ -452,6 +452,25 @@ def _register_disambiguation(sess: Session, query: str, hits: list[dict]) -> Non
         {"query": query, "candidates": hits, "key": key, "ask_count": 0})
 
 
+def _narrow_disambiguation(sess: Session, current: list[dict], narrowed: list[dict]) -> None:
+    """Replace one outstanding candidate set with a deterministic subset.
+
+    ``Session.pending_disambiguations`` is the authoritative, persisted
+    clarification state.  ``ChatState.pending_clarification`` may mirror it
+    for presentation/pronoun handling, but narrowing only that transient list
+    would be lost on reload and would incorrectly let a later size-only reply
+    choose across the original, wider set.
+    """
+    current_key = _disambiguation_key(current)
+    narrowed_key = _disambiguation_key(narrowed)
+    for entry in sess.pending_disambiguations:
+        if entry["key"] != current_key:
+            continue
+        entry["candidates"] = list(narrowed)
+        entry["key"] = narrowed_key
+        return
+
+
 def _clear_disambiguations_matching(sess: Session, *, item_name: str | None = None,
                                     gourmet_number: int | None = None,
                                     topping_name: str | None = None) -> None:

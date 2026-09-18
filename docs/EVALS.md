@@ -637,6 +637,34 @@ asserted the old, permissive behavior for a compound utterance (a clear
 pizza base plus one unresolvable modifier/clause) — see ADR-017's "Known,
 accepted tradeoff" for the honest cost of that correction.
 
+**Correction — T-039B, 2026-09-18: retrieval is not customer authorization.**
+T-039A's LLM-path guard trusted any `search_menu` hit returned during the
+same turn as authorization for a matching `add_item`, with no check that
+the hit was unambiguous and no check that the model's own search *query*
+had any support in the customer's utterance. Reproduced directly: customer
+says "I want a salad," model calls `search_menu("wrap")` then
+`add_item("WRAP")` — authorized, WRAP added. The same shape worked for a
+model-chosen "coke" query resolving to `CAN`, and a model-chosen
+"bruschetta" query resolving to a gourmet pizza. A retrieved candidate was
+being treated as customer consent instead of evidence for a clarifying
+question — the same underlying defect class T-039/T-039A closed for a
+*direct* substitution, now shown to also apply to a *retrieved* one.
+Replaced with `_authorize_item_creation`, which requires both the search
+query and the exact retrieved SKU to be independently supported by the
+customer's own words, and added deterministic resolution of an explicit
+follow-up ("the large garden salad") against the server-owned
+`session.pending_disambiguations` set, including narrowing a family
+("the garden one") before a bare size ("large") resolves it. A related
+persistence gap was found and fixed in the same task: registering,
+narrowing, or clearing `pending_disambiguations` is a real mutation of
+authoritative clarification state, but `search_menu` was treated as
+read-only, so that state was never saved — a dropped call or reload
+between an ambiguous search and the customer's next turn silently lost the
+pending clarification. Full mechanism: ADR-017's T-039B amendment.
+`evals/cases/non_pizza_items.yaml` gained 3 cases (`NONPIZZA-006/007/008`:
+family narrowing, the adversarial unsupported-search-then-select shape,
+and rejection of a SKU outside the pending set) — 81 cases total.
+
 ## Release gate
 
 **This is the future production-model gate (PLANNED — no real `score

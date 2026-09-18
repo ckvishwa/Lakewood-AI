@@ -8,7 +8,13 @@ extended, by fail-closed intent parsing. See "Amendment: fail-closed intent
 parsing replaces the denylist (T-039A)" after "Consequences" for the
 current mechanism — read that section for what the code actually does
 today; the original "Decision" section is kept for historical diagnosis
-context only and is marked accordingly.
+context only and is marked accordingly. **Amended again 2026-09-18
+(T-039B).** T-039A's mutation-boundary guard treated any `search_menu` hit
+returned during the same turn as authorization, including a hit returned
+under `needs_disambiguation=True` and a hit for a query the model invented
+with no support in the customer's own words. See "Amendment: retrieval is
+not customer authorization (T-039B)" after the T-039A amendment for the
+current mechanism.
 
 ## Context
 
@@ -334,3 +340,193 @@ explaining why.
 - No change to `orders.py`'s FSM or any pricing logic; `orders.py` gained
   no new code this task (only the T-039 `non_pizza_alias_hits` promotion,
   already in place before T-039A started).
+
+## Amendment: retrieval is not customer authorization (T-039B)
+
+**T-039A's `_item_creation_is_authorized` was still wrong, in a way T-039A's
+own tests never exercised.** It treated ANY `search_menu` hit returned
+during the same turn as authorization for a matching `add_item` call — with
+no check that the hit itself was unambiguous, and no check that the
+model's own search *query* had any support in the customer's utterance.
+Concretely, reproduced directly against the pre-T-039B code:
+
+| Customer said | Model called | Result |
+|---|---|---|
+| "I want a salad." | `search_menu("wrap")` then `add_item("WRAP")` | WRAP added, $12.00 |
+| "I want a salad." | `search_menu("coke")` then `add_item("CAN")` | CAN added |
+| "I want a large salad." | `search_menu("bruschetta")` then `add_item(PIZZA, size=large, gourmet_number=5)` | gourmet #5 large pizza added |
+
+None of these three model-chosen queries — "wrap," "coke," "bruschetta" —
+appears anywhere in the customer's own words. A model free to choose its
+own search query and then treat whatever comes back as self-authorizing is
+functionally unconstrained: retrieval was standing in for consent.
+
+A second, narrower gap in the same function: a genuinely ambiguous
+`search_menu` result (`needs_disambiguation=True`, e.g. "I want a salad"
+returning both `GARDEN SALAD SM` and `GARDEN SALAD LG`) was flattened into
+the same undifferentiated `search_hits` list as an unambiguous one, so a
+model could pick either candidate out of a set the customer was never
+actually asked to choose from and have it treated as an authorized unique
+result.
+
+A third gap, found while building the fix, was a persistence defect, not
+an authorization one: `search_menu` was treated by `PersistentChat` as
+read-only (harmless, no save needed), which is true for a plain miss or a
+unique hit, but not for an AMBIGUOUS hit — registering candidates mutates
+`session.pending_disambiguations`, and that mutation was never persisted.
+A dropped call, crash, or reload between the ambiguous search and the
+customer's next turn silently lost the pending clarification, forcing the
+customer to restate the entire request.
+
+### Decision (current)
+
+**A retrieved candidate is evidence for asking a clarifying question,
+never evidence that the customer already answered it.** `add_item` is
+authorized only for one of three reasons, returned as a stable code from
+`_authorize_item_creation` (`lakewood/interpreter.py`) rather than a bare
+boolean, so tests and traces can distinguish *why*:
+
+- `AUTH_DIRECT_UTTERANCE_EVIDENCE` — `_has_pizza_intent` for a pizza, or
+  `oe.non_pizza_alias_hits` for a non-pizza item; the same direct-evidence
+  check T-039A already had, unit for unit.
+- `AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT` — a `search_menu` hit from THIS
+  turn that (a) was not itself returned under
+  `needs_disambiguation=True`, AND (b) the model's own search query is
+  independently supported by the customer's current words
+  (`_search_query_supported_by_utterance`), AND (c) the exact retrieved SKU
+  is independently supported by the customer's current words
+  (`_item_hit_supported_by_utterance` — matches the hit's own distinguishing
+  name words and, where the name encodes a size, the size the customer
+  actually said). A model cannot manufacture authorization by choosing a
+  favorable query; the query itself has to already be grounded in what the
+  customer said.
+- `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` — the item names an entry in
+  `chat.session.pending_disambiguations` (server-owned F17 state, never
+  anything the model supplies) that `_select_pending_candidate` deterministically
+  matches against THIS utterance's own words. This is the explicit
+  follow-up path: "I want a salad" → ambiguous search registers
+  `GARDEN SALAD SM`/`LG` (among others) as pending → "the large garden
+  salad" selects `GARDEN SALAD LG` uniquely. `_select_pending_candidate`
+  also returns a `NARROWED` outcome when the utterance narrows the set
+  without uniquely resolving it (e.g. "the garden one" narrows to just the
+  GARDEN family, but size is still unstated) — `RuleBasedInterpreter`
+  replaces the pending set with the narrowed one
+  (`oe._narrow_disambiguation`) and asks specifically for size, so a later
+  bare "large" resolves correctly against the now-narrowed set instead of
+  either failing or guessing across the original, wider one. Both
+  interpreters share this one matcher — not two independently-drifting
+  copies.
+
+Anything else returns a non-authorizing reason — `AUTH_AMBIGUOUS_
+CANDIDATE_NOT_CONFIRMED` when the only matching hit was itself ambiguous
+(customer-safe message: "Could you tell me which one you'd like?"), else
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` (the existing generic clarification
+message) — and `add_item` never runs.
+
+**Persistence fix, same task:** `PersistentChat.run_turn` now fingerprints
+`session.unresolved_lookups` and `session.pending_disambiguations` before
+and after the turn (`_clarification_fingerprint`) and saves through the
+existing repository path whenever that fingerprint changes — whether the
+change is a fresh ambiguous registration, a narrowing, or a clearing on
+resolution. A harmless unique/miss `search_menu` call, which changes
+neither, still writes nothing (verified:
+`test_llm_harmless_read_only_tool_does_not_write_a_session`, renamed from
+`test_llm_read_only_tool_does_not_write_a_session` to say what it now
+actually distinguishes). `ChatState.pending_clarification` is documented as
+a presentation/pronoun cache only — `session.pending_disambiguations`
+remains the one authoritative, persisted source; `PersistentChat._chat_for`
+rebuilds the cache from that authoritative state after every load/resume,
+so a recovered session's next turn ("the large garden salad") resolves
+correctly against the real, reloaded candidate set.
+
+### Alternatives considered
+
+**Trust any hit `search_menu` returns this turn, but require the model to
+name the SAME query as the customer's utterance verbatim.** Rejected as
+both too strict (a model may reasonably paraphrase "wrap" as "chicken
+wrap" if the customer said "chicken wrap") and insufficient on its own —
+the exact-SKU check is still needed independently, since a supported query
+could still return a hit for a *different* item than the customer named
+(a broad query matching multiple unrelated things). Token-level support
+checking both the query and the specific hit, not string equality, is what
+actually closes the gap.
+
+**Drop `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` entirely and require
+the model to re-run `search_menu` every follow-up turn.** Rejected: this
+would work but forces an extra round-trip tool call for the single most
+common real conversational shape (customer answers a clarifying question
+directly) and duplicates work the server already has authoritative state
+for for (`pending_disambiguations`). Resolving deterministically against
+that server-owned state, with strict word-matching, gives the same
+guarantee without the extra latency/cost, and gives `RuleBasedInterpreter`
+(which has no `search_menu` round-trip at all) the identical capability.
+
+**Persist after every tool call, unconditionally.** Rejected: most tool
+calls (a harmless miss, a unique unambiguous hit that gets immediately
+consumed by an authorized `add_item` in the same turn, `set_customer`
+already covered by the existing mutation-save path) don't need it and it
+would mask the actual invariant (authoritative clarification-state change)
+behind a blanket "always write" policy that gives no signal about what
+specifically needed durability.
+
+### Consequences (T-039B)
+
+- `lakewood/interpreter.py`: `_item_creation_is_authorized` replaced by
+  `_authorize_item_creation` (returns a reason code, takes `size` and
+  `pending_disambiguations`); new `AUTH_*` reason constants and
+  `_AUTHORIZED_REASONS`; new `_size_supported_by_utterance`,
+  `_words_present`, `_search_query_supported_by_utterance`,
+  `_item_hit_supported_by_utterance`, `_matching_search_hit`,
+  `_select_pending_candidate`. `RuleBasedInterpreter`'s pending-candidate
+  resolution now routes item-kind hits through `_select_pending_candidate`
+  instead of a raw substring-of-the-canonical-name check that could never
+  match a spoken size word ("large") against a candidate's abbreviated
+  suffix ("LG"). Each `search_menu` hit is now tagged per-turn with
+  `_ambiguous`/`_search_query` provenance before entering
+  `search_hits_this_turn`. The `add_item` tool-result dict now carries an
+  `authorization_reason` field (trace/log visible; never spoken to the
+  customer — the reply text never contains a reason-code string).
+- `lakewood/orders.py`: new `_narrow_disambiguation`, replacing one
+  outstanding candidate set with a deterministic subset in
+  `session.pending_disambiguations` (the authoritative state, not just the
+  transient cache).
+- `lakewood/chat.py`: `PersistentChat._chat_for` restores
+  `pending_clarification` from `session.pending_disambiguations` on
+  load/resume; `PersistentChat._clarification_fingerprint` and the
+  before/after check in `PersistentChat.run_turn`; `run_turn`'s own
+  tool-dispatch loop keeps `chat.pending_clarification` synchronized after
+  any `add_item`/`add_modifier`/`decline_item` that changes pending state.
+- `tests/test_t039b_candidate_authorization.py`: 15 new tests — both
+  same-response and later-internal-round rejection of an ambiguous
+  candidate, explicit next-turn selection, family narrowing then bare-size
+  resolution, rejection of a SKU outside the pending set, the unique-
+  supported-search-result path staying functional, the authorization
+  reason being trace-visible but never customer-visible, all three
+  model-controlled unsupported-unique-search adversarial cases (wrap/coke/
+  gourmet), direct pizza evidence never authorizing an unspoken size or
+  gourmet number, and two full `PersistentChat`+real repository round trips
+  (plain pending-candidate persistence and narrowed-family persistence)
+  proving reload/recovery preserves clarification state and a later
+  explicit or narrowed selection still resolves correctly afterward.
+- `tests/test_persistent_chat_path.py`: one test renamed
+  (`test_llm_read_only_tool_does_not_write_a_session` →
+  `test_llm_harmless_read_only_tool_does_not_write_a_session`) and its
+  fixture query changed from "wings" to "wrap" to stay a genuinely harmless
+  unique hit under the new, stricter authorization semantics.
+- `tests/test_openai_provider.py`: one fixture utterance changed from
+  `'Pizza'` to `'Large pizza'` — a bare "Pizza" alone no longer carries
+  positive size evidence and isn't the thing this test is about.
+- `evals/cases/non_pizza_items.yaml`: 3 new cases (`NONPIZZA-006` family
+  narrowing then bare-size resolution, `NONPIZZA-007` the adversarial
+  unsupported-search-then-select shape, `NONPIZZA-008` rejection of a SKU
+  outside the pending set) plus `expect_disambiguation` annotations added
+  to two pre-existing cases (`NONPIZZA-001`, `NONPIZZA-005`).
+- `validate`: 81/81 (was 78/78 — pure corpus growth, no regressions).
+- Rule-based ratchet: 50/81 (was 46/78). +1 genuine flip (`NONPIZZA-005`'s
+  second turn, "the small one," now resolves via `_select_pending_candidate`
+  instead of the old raw substring check) + 3 new cases, all passing as
+  authored. Full arithmetic: `tests/test_evals.py`'s baseline comment.
+- Pricing parity: 50/50, unchanged.
+- Full suite: 561 passed, 2 skipped, 2 xfailed (was 546 passed — 15 new
+  tests, zero regressions).
+- No change to `orders.py`'s FSM or any pricing logic.

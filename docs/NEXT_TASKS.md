@@ -2,6 +2,41 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+**T-039B is DONE (2026-09-18)** — T-039A's LLM-path guard
+(`_item_creation_is_authorized`) treated any `search_menu` hit returned
+this turn as authorization, even one returned under
+`needs_disambiguation=True` and even when the model's own search query had
+no support in the customer's utterance — reproduced directly: "I want a
+salad" → model searches "wrap"/"coke"/a gourmet number → adds that
+unrelated valid SKU, authorized. Replaced with `_authorize_item_creation`,
+which returns a reason code (`AUTH_DIRECT_UTTERANCE_EVIDENCE`/
+`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`/`AUTH_CUSTOMER_CONFIRMED_PENDING_
+CANDIDATE` authorize; `AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED`/
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` do not) and requires both the search
+query and the exact retrieved SKU to be independently supported by the
+customer's own words, never the model's say-so. Added deterministic
+explicit-follow-up resolution against the server-owned
+`session.pending_disambiguations` set (`_select_pending_candidate`, shared
+by both interpreters — resolves "the large garden salad" directly, and
+narrows a family like "the garden one" before a later bare "large"
+resolves it). Also fixed a persistence gap found while building this:
+`search_menu` was treated as read-only, but registering/narrowing/clearing
+`pending_disambiguations` is a real mutation of authoritative clarification
+state that was never saved — `PersistentChat.run_turn` now fingerprints
+that state before/after the turn and saves only when it actually changed.
+Full reasoning and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+15 new tests (`tests/test_t039b_candidate_authorization.py`), 3 new corpus
+cases (`evals/cases/non_pizza_items.yaml`: NONPIZZA-006/007/008).
+`validate` 81/81 (was 78/78), rule-based ratchet 50/81 (was 46/78 — +1
+genuine flip, +3 new cases passing as authored; honest breakdown in
+`tests/test_evals.py`'s baseline comment), pricing parity 50/50 unchanged,
+full suite 561/2/2 (was 546/2/2, zero regressions). **Live N=3 still
+BLOCKED** — no `EXPLABS_API_KEY` in this environment; owner action needed.
+Recommended next task: **T-038 Phase 2's remaining item** below (real
+hardware voice loop), or **T-040** below if UX polish on the disambiguation
+follow-up wording is preferred first.
+
 **T-039A is DONE (2026-09-17)** — reopened T-039 the same day: T-039's fix
 (`_NON_PIZZA_HEAD_WORDS`, a 12-word denylist) did not establish the general
 "never substitute" invariant it claimed. Confirmed directly on the commit
