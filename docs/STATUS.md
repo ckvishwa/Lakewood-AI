@@ -3,10 +3,10 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-18 on Windows/offline (T-039B — retrieval is not
-customer authorization), branch `codex/parakeet-stt`. Real GPU numbers in
-the T-038 Phase 2 entry below were measured separately on the owner's
-Windows/WSL hardware and are unaffected by this task.
+Last verified: 2026-09-18, live N=3 Experiential acceptance gate for
+T-039/T-039A/T-039B (`gpt-5.6-luna`), branch `codex/parakeet-stt`. Real GPU
+numbers in the T-038 Phase 2 entry below were measured separately on the
+owner's Windows/WSL hardware and are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -21,6 +21,121 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-039 live N=3 Experiential acceptance gate: FAIL (evidence-vocabulary
+gap), 2026-09-18. Primary substitution-safety objective PASSES cleanly.**
+Ran the real `LAKEWOOD_LLM_PROVIDER=experiential` (`gpt-5.6-luna`) provider
+against the full 81-case corpus three times sequentially, no code/prompt/
+label changes between runs, one trace file preserved per run:
+
+```
+Run 1: 48/81 full-corpus, 41/73 historical-overlap — trace evals/traces/20260918T124814_llm.jsonl
+Run 2: 47/81 full-corpus, 39/73 historical-overlap — trace evals/traces/20260918T125937_llm.jsonl
+Run 3: 49/81 full-corpus, 41/73 historical-overlap (1 provider timeout on CONFIRM-004, preserved honestly, not retried) — trace evals/traces/20260918T131230_llm.jsonl
+```
+
+Historical-overlap set (73 case IDs) determined from git history, not
+guessed: `evals/cases/non_pizza_items.yaml` was introduced wholesale (8
+case IDs, `NONPIZZA-001`..`008`) in the single commit that closed T-039
+(`57344f2`); the corpus at the parent commit was independently counted at
+exactly 73 `- id:` entries across the other 10 case files, and no other
+commit since has added or removed a case ID (`adversarial.yaml`,
+`invalid_and_ambiguous.yaml`, `store_info_and_coupons.yaml` changed
+between then and now, but only relabeled 4 existing IDs per ADR-017's
+T-039A amendment — case counts unchanged, verified directly). 81 - 8 = 73,
+matching the historical corpus size exactly.
+
+**Comparison against the T-032 band (53/54/56, mean 54.33, same provider
+and model):** 41/39/41 (mean 40.33) — a real, substantial drop. Every
+add_item authorization across all 3 runs (316 calls total) was scanned
+programmatically for a bypass (an `ok` result whose `authorization_reason`
+is not one of the three authorized codes): **zero found, in every run.**
+Zero silent substitutions, zero unauthorized cart mutations, zero internal
+error/reason-code strings leaked into any customer-facing reply (scanned
+all 3 full traces). This is the primary objective T-039/T-039A/T-039B
+exists to gate, and it holds robustly.
+
+**The score drop is NOT explained by "safe refusal of an adversarial
+substitution attempt."** Root-caused instead to pre-existing, narrow
+evidence-vocabulary gaps in the mutation-boundary guard that were never
+consequential before T-039B (when ANY search hit authorized a mutation,
+regardless of exact wording) and are now newly load-bearing:
+
+1. `_PIZZA_WORD_RE` (`\bpizza\b|\bpie\b`) does not match the PLURAL
+   ("pizzas"/"pies") — `\b` requires a non-word boundary immediately after
+   the word, which a trailing "s" is not. Reproduced directly:
+   `_has_pizza_intent("three medium cheese pizzas")` → `False`. Blocks
+   correctly-specified multi-item/quantity pizza orders (`QTY-002`,
+   `MULTI-001/003/004/006`, all 3 runs, identical failure).
+2. `_pizza_shorthand_residual`'s intensity vocabulary has no entry for
+   "triple"/"quadruple" (only the words T-039A's original authoring
+   session used). `_has_pizza_intent("small cheese with triple
+   pepperoni")` → `False` — the whole utterance is correctly pizza-shaped
+   and the model's proposed item/size is exactly right, but the residual
+   word "triple" blocks it (`MOD-032`, all 3 runs).
+3. Gourmet-number evidence (`_item_hit_supported_by_utterance`'s
+   `kind == "gourmet"` branch) only matches numeral digits (`#10`/"number
+   10"), never a spelled-out cardinal ("number ten"). Blocks legitimate
+   gourmet selections stated in ordinary spoken English
+   (`GOURMET-005/010/011/012/013`, all 3 runs).
+4. Non-pizza item/candidate word-matching (`_item_hit_supported_by_
+   utterance`, `_select_pending_candidate`, `oe.non_pizza_alias_hits`) has
+   no mapping from a spelled-out quantity phrase ("six piece wings") to an
+   abbreviated menu-key token ("6PC WINGS") — blocks a legitimate wing
+   order even after the customer explicitly answers the system's own
+   disambiguation question (`CORRECT-007`, `MULTI-002`, `COUPON-001`, all
+   3 runs, identical failure shape each time).
+
+None of these four ever produced a wrong item in the cart — the guard
+correctly refused every one (empty/unchanged cart in every case), which is
+why the primary criterion still holds. But they DO falsify the "supported
+direct orders still work" acceptance criterion, which the task requires
+literally: a real, well-specified, non-adversarial customer utterance was
+wrongly refused, reproducibly, in all 3 runs, for the same root cause each
+time. **Filed as T-041** (see `docs/NEXT_TASKS.md`) — the smallest bounded
+fix is expanding the evidence vocabulary in the four spots above, not
+re-architecting the guard.
+
+**One additional, narrower, genuinely flaky finding: `NONPIZZA-006`
+("I want a salad." → "The garden one." → "Large.") failed in Run 1
+(unnecessary `transfer_to_human`) but passed in Runs 2 and 3.** Cause:
+`LLMInterpreter` has no equivalent of `RuleBasedInterpreter`'s
+`_narrow_disambiguation` — when the model's own reply narrows the
+candidate set conversationally ("Would you like the small or large Garden
+Salad?"), `session.pending_disambiguations` is never actually narrowed for
+the LLM path, so a later bare "Large." must still resolve against the
+original 4-candidate, 2-family set, which `_select_pending_candidate`
+correctly refuses to guess across. In Runs 2/3 the model happened to issue
+an additional `search_menu("GARDEN SALAD", ...)` that registered a NEW,
+already-narrowed 2-candidate entry, which the bare "Large." then resolved
+against — a real but incidental self-recovery, not a designed one. In Run
+1 the model's retry query ("large garden salad") returned `NO_MATCH`
+instead, so no narrower entry existed and the model gave up and
+transferred. Cart stayed empty and correct in the failing run — not a
+substitution, a lower-severity UX gap (SYSTEM_DEFECT class, not P0).
+Rolled into the same T-041 follow-up scope as a secondary item, since it
+shares the same "LLM path lacks a capability `RuleBasedInterpreter`
+already has" shape as finding 4 above.
+
+**Zero pricing mismatches were caused by any T-039B code change.**
+`orders.py`'s pricing/domain code is untouched by T-039B except
+`_narrow_disambiguation` (which never touches price). The two pricing-
+label misses observed (`MOD-035`, `MOD-036`) both trace to pre-existing,
+unrelated model behavior — an ambiguous topping search the model abandoned
+without asking (`MOD-035`, the pizza itself priced correctly) and the
+model choosing `DOUBLE` mozzarella intensity for "extra cheese" (`MOD-036`,
+a modifier-selection choice, not an item-authorization one) — not to the
+mutation-boundary guard.
+
+Full authorization-reason breakdown, hallucinated-SKU counts (all
+domain-layer rejections, never a mutation), latency, and token/cost
+figures per run: `docs/EVALS.md`'s T-039 live-gate section.
+
+**Recommended next task: T-041** (the evidence-vocabulary fix above), NOT
+T-038 Phase 2 — the FAIL branch of this gate's own acceptance criteria
+("Supported direct orders still work") means the live gate has not yet
+fully closed, even though the P0-relevant half (silent substitution risk)
+is fully closed and re-confirmed across three independent live runs.
 
 **T-039B done, 2026-09-18: T-039A's LLM-path mutation-boundary guard
 (`_item_creation_is_authorized`) treated ANY `search_menu` hit returned
@@ -808,6 +923,33 @@ the OpenAI T-013c section further below is preserved as-is.
 ## Latest verification
 
 ```
+python -m pytest --no-header (2026-09-18, live gate)       → 561 passed, 2 skipped, 2 xfailed —
+                                                           unchanged from T-039B; confirms no code
+                                                           drift occurred across the 3 live runs.
+python evals/runner.py validate                          → 81/81, unchanged
+python evals/runner.py score --adapter rule_based         → 50/81, unchanged
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → Run1 48/81 (41/73 overlap), Run2 47/81
+                                                           (39/73 overlap), Run3 49/81 (41/73
+                                                           overlap, 1 provider timeout on
+                                                           CONFIRM-004, honestly preserved). Zero
+                                                           silent substitutions, zero authorization
+                                                           bypasses, all 3 runs — see "T-039 live
+                                                           N=3 Experiential acceptance gate" above
+                                                           for full analysis. Historical-overlap
+                                                           mean 40.33 vs T-032's 54.33 — root-caused
+                                                           to evidence-vocabulary gaps (T-041 filed),
+                                                           not substitution risk. Traces:
+                                                           evals/traces/20260918T124814_llm.jsonl,
+                                                           20260918T125937_llm.jsonl,
+                                                           20260918T131230_llm.jsonl.
+```
+
+Earlier verification (2026-09-18, T-039B, offline only — live gate was
+BLOCKED at that time), still valid and superseded only by the above where
+they overlap:
+
+```
 python -m pytest --no-header (2026-09-18, T-039B)          → 561 passed, 2 skipped (live-Postgres-
                                                            only, no LAKEWOOD_POSTGRES_TEST_DSN in
                                                            this environment), 2 xfailed (pre-
@@ -820,15 +962,6 @@ python evals/runner.py validate                          → 81/81 (was 78/78 �
 python evals/runner.py score --adapter rule_based         → 50/81 (was 46/78) — see "T-039B done"
                                                            above for the honest ratchet arithmetic
 python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
-python evals/runner.py score --adapter llm (N=3, live)    → still BLOCKED — no EXPLABS_API_KEY in
-                                                           this environment; this task touched no
-                                                           LLMInterpreter prompt/tool-description/
-                                                           provider surface (the mutation-boundary
-                                                           guard only ever REJECTS an unauthorized
-                                                           call closer to what the system prompt
-                                                           already asks for). T-032's 53/54/56
-                                                           (mean 54.33) band is still the current
-                                                           live baseline.
 ```
 
 Earlier verification (2026-09-17, T-039A), still valid and superseded only by

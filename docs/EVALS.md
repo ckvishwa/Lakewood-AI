@@ -665,6 +665,118 @@ pending clarification. Full mechanism: ADR-017's T-039B amendment.
 family narrowing, the adversarial unsupported-search-then-select shape,
 and rejection of a SKU outside the pending set) — 81 cases total.
 
+## T-039 live N=3 Experiential acceptance gate, 2026-09-18
+
+The deferred live acceptance measurement for T-039/T-039A/T-039B, run once
+`EXPLABS_API_KEY` became available. Provider `LAKEWOOD_LLM_PROVIDER=
+experiential`, model `gpt-5.6-luna` (repo default, `LAKEWOOD_LLM_MODEL`
+unset) — same provider/model as the T-032 historical band. Fixed config
+across all 3 runs: temperature 0, 30s per-request timeout, 12-round tool
+loop cap, 81-case corpus, no code/prompt/label changes between runs.
+
+```
+                full/81   overlap/73   provider fails   trace
+Run 1           48        41           0                evals/traces/20260918T124814_llm.jsonl
+Run 2           47        39           0                evals/traces/20260918T125937_llm.jsonl
+Run 3           49        41           1 (CONFIRM-004,   evals/traces/20260918T131230_llm.jsonl
+                                        timeout, honestly
+                                        preserved, not
+                                        retried)
+mean            48.0      40.33
+```
+
+**Historical-overlap set (73 IDs) determined from git history, not
+guessed:** `evals/cases/non_pizza_items.yaml` was introduced wholesale (8
+IDs: `NONPIZZA-001`..`008`) in the commit that closed T-039 (`57344f2`);
+the corpus at that commit's parent was independently counted at exactly 73
+`- id:` entries; no case ID was added or removed by any commit since (3
+files were touched for label corrections only, per ADR-017's T-039A
+amendment — counts unchanged, verified directly). 81 − 8 = 73.
+
+**Primary acceptance criterion (silent item substitutions: 0) PASSES,
+robustly, across all 3 runs.** Every `add_item` call in all 3 traces (316
+total) was scanned programmatically for an authorization bypass — an `ok`
+result whose `authorization_reason` is not one of
+`DIRECT_UTTERANCE_EVIDENCE`/`UNIQUE_SUPPORTED_SEARCH_RESULT`/
+`CUSTOMER_CONFIRMED_PENDING_CANDIDATE`. **Zero found, in every run.** Zero
+internal error/reason-code strings leaked into any customer-facing reply
+(scanned all 3 full traces for the raw code names and internal detail
+markers). All authorization rejections left the cart provably unchanged —
+guaranteed structurally, since `add_item`'s real domain mutation is only
+ever reached after `auth_reason in _AUTHORIZED_REASONS` passes; the zero-
+anomaly scan is the direct proof this held live, not just in the type
+system.
+
+Authorization-rejection totals across the 3 runs:
+
+```
+                Run1   Run2   Run3
+DIRECT_UTTERANCE_EVIDENCE           37     36     36
+UNIQUE_SUPPORTED_SEARCH_RESULT       3      3      2
+CUSTOMER_CONFIRMED_PENDING_CANDIDATE 4      4      6
+AMBIGUOUS_CANDIDATE_NOT_CONFIRMED    4      2      2
+UNSUPPORTED_ITEM_SUBSTITUTION       60     56     61
+```
+
+**The historical-overlap drop (54.33 mean → 40.33 mean vs the T-032 band)
+is NOT explained by "safe refusal of an adversarial substitution
+attempt."** Root-caused to four narrow, pre-existing evidence-vocabulary
+gaps in the mutation-boundary guard, never consequential before T-039B
+made exact-word support load-bearing:
+
+1. `_PIZZA_WORD_RE` doesn't match the plural ("pizzas") — `_has_pizza_
+   intent("three medium cheese pizzas")` → `False`, reproduced directly.
+   Blocks `QTY-002`, `MULTI-001/003/004/006` identically in all 3 runs.
+2. Pizza-shorthand intensity vocabulary has no "triple"/"quadruple" —
+   blocks `MOD-032` ("small cheese with triple pepperoni") in all 3 runs.
+3. Gourmet-number evidence only matches numeral digits, never a spelled-
+   out cardinal ("number ten") — blocks `GOURMET-005/010/011/012/013` in
+   all 3 runs.
+4. Non-pizza candidate word-matching has no spelled-out-quantity-to-
+   abbreviated-SKU mapping ("six piece wings" → "6PC WINGS") — blocks
+   `CORRECT-007`, `MULTI-002`, `COUPON-001` in all 3 runs, even after the
+   customer explicitly answers the system's own disambiguation question.
+
+None of these four produced a wrong item — every one is a correct refusal
+of a CORRECT, non-adversarial request. This falsifies the "supported
+direct orders still work" acceptance criterion (required, not optional),
+so the live gate's **overall verdict is FAIL**, even though the P0-
+relevant half (substitution safety) is fully closed. Filed as **T-041**
+(`docs/NEXT_TASKS.md`) — expand the evidence vocabulary at the four points
+above; do not weaken `_authorize_item_creation`'s actual authorization
+logic.
+
+**Secondary, flaky finding: `NONPIZZA-006` failed in Run 1 (unnecessary
+`transfer_to_human`, empty cart, never a substitution) but passed in Runs
+2/3**, because `LLMInterpreter` has no equivalent of `RuleBasedInterpreter`'s
+`_narrow_disambiguation` — a model's own conversational narrowing reply
+doesn't persist server-side. Runs 2/3 self-recovered only because the
+model happened to issue an extra `search_menu` that registered a fresh,
+already-narrowed candidate entry; Run 1's retry query returned `NO_MATCH`
+instead, so no such entry existed. Rolled into T-041's scope.
+
+**Zero pricing mismatches were caused by T-039B.** `orders.py`'s pricing
+code is untouched by T-039B except `_narrow_disambiguation` (never touches
+price). The two pricing-label misses observed (`MOD-035`, `MOD-036`) trace
+to pre-existing, unrelated model behavior (an abandoned ambiguous-topping
+search; a `DOUBLE`-intensity modifier choice for "extra cheese") — not to
+the mutation-boundary guard.
+
+**Provider usage, mean across 3 runs:** ~398 requests, ~515K total tokens
+(mostly prompt), mean latency ~1.8s/request (median ~1.7s, p95 ~2.9s),
+$0.00 provider-reported cost on every request (Experiential reports no
+`usage.cost` field for this model — "no cost reported," never assumed
+$0). Schema violations (BAD_ARGS/UNKNOWN_TOOL): 0 in every run —
+100% of the model's tool-call shapes were schema-valid. Hallucinated-SKU
+calls (all safely rejected before any domain mutation, per `NO_MATCH`/
+`ITEM_NOT_FOUND`-class codes): 35–38 per run.
+
+**T-038 Phase 2 (real-hardware voice loop) does NOT unblock from this
+result** — the FAIL verdict above means **T-041** is the required next
+step, not the microphone loop; re-run this same N=3 gate once T-041 lands
+to confirm the historical-overlap recovers without reintroducing any
+authorization bypass.
+
 ## Release gate
 
 **This is the future production-model gate (PLANNED — no real `score

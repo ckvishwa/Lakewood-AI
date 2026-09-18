@@ -2,6 +2,52 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+**T-041 · Mutation-boundary guard's evidence vocabulary blocks legitimate
+direct orders (found by T-039 live N=3 gate)** — **Priority:** 1 ·
+**Status:** Not started. Live N=3 Experiential (`gpt-5.6-luna`) run found
+**zero silent substitutions and zero authorization bypasses across all 3
+runs** (the P0-relevant objective T-039/T-039A/T-039B exists to gate is
+fully closed and reconfirmed) — but the historical 73-case overlap dropped
+from the T-032 band (53/54/56) to 41/39/41, root-caused to four narrow,
+pre-existing evidence-vocabulary gaps that were never consequential before
+T-039B's strict enforcement made them load-bearing:
+1. `_PIZZA_WORD_RE` (`\bpizza\b|\bpie\b`) doesn't match the plural
+   ("pizzas"/"pies") — blocks correctly-specified multi-item/quantity
+   pizza orders ("three medium cheese pizzas").
+2. `_pizza_shorthand_residual`'s intensity vocabulary has no "triple"/
+   "quadruple" — blocks a plainly pizza-shaped direct order ("small cheese
+   with triple pepperoni").
+3. Gourmet-number evidence only matches numeral digits ("#10"), never a
+   spelled-out cardinal ("number ten") — blocks legitimate gourmet
+   selections stated in ordinary speech.
+4. Non-pizza item/candidate word-matching has no mapping from a spelled-
+   out quantity phrase ("six piece wings") to an abbreviated menu-key
+   token ("6PC WINGS") — blocks a legitimate wing order even after the
+   customer explicitly answers the system's own disambiguation question.
+
+Secondary, related item: `LLMInterpreter` has no equivalent of
+`RuleBasedInterpreter`'s `_narrow_disambiguation` — a model's own
+conversational narrowing reply doesn't persist server-side, so a later
+bare-size follow-up sometimes fails to resolve (flaky: failed 1 of 3 live
+runs on `NONPIZZA-006`, safely — empty cart, unnecessary transfer, never a
+substitution).
+
+None of these ever produced a wrong item in the cart (structurally
+verified: every `add_item` across all 3 runs scanned for an authorization
+bypass, zero found) — they cause a correct, non-adversarial utterance to be
+wrongly refused. Full evidence, exact case IDs, and reproduction:
+`docs/STATUS.md`'s "T-039 live N=3 Experiential acceptance gate" section.
+**Scope:** expand the evidence vocabulary at the four points above (and,
+if time permits, give the LLM path its own narrowing hook mirroring
+`_narrow_disambiguation`); add a regression case per gap; re-run the N=3
+live gate and confirm the 73-case historical overlap recovers materially
+without reintroducing any authorization bypass (0 silent substitutions
+must remain 0). **Do not weaken `_authorize_item_creation`'s actual
+authorization logic to "fix" this — only widen what counts as evidence.**
+Recommended next task after T-041 lands: re-run this same N=3 live gate to
+confirm recovery, then T-038 Phase 2 (real-hardware voice loop) if it
+passes.
+
 **T-039B is DONE (2026-09-18)** — T-039A's LLM-path guard
 (`_item_creation_is_authorized`) treated any `search_menu` hit returned
 this turn as authorization, even one returned under
@@ -31,11 +77,13 @@ cases (`evals/cases/non_pizza_items.yaml`: NONPIZZA-006/007/008).
 `validate` 81/81 (was 78/78), rule-based ratchet 50/81 (was 46/78 — +1
 genuine flip, +3 new cases passing as authored; honest breakdown in
 `tests/test_evals.py`'s baseline comment), pricing parity 50/50 unchanged,
-full suite 561/2/2 (was 546/2/2, zero regressions). **Live N=3 still
-BLOCKED** — no `EXPLABS_API_KEY` in this environment; owner action needed.
-Recommended next task: **T-038 Phase 2's remaining item** below (real
-hardware voice loop), or **T-040** below if UX polish on the disambiguation
-follow-up wording is preferred first.
+full suite 561/2/2 (was 546/2/2, zero regressions). **Live N=3 ran
+2026-09-18 (see T-041 above) — zero silent substitutions, zero
+authorization bypasses; historical-overlap score dropped to 41/39/41 vs
+T-032's 53/54/56, root-caused to evidence-vocabulary gaps, not
+substitution risk.** Superseded by T-041's entry above; recommended next
+task is **T-041**, not T-038 Phase 2, until the live gate re-confirms
+recovery.
 
 **T-039A is DONE (2026-09-17)** — reopened T-039 the same day: T-039's fix
 (`_NON_PIZZA_HEAD_WORDS`, a 12-word denylist) did not establish the general
