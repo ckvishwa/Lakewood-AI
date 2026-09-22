@@ -1,12 +1,24 @@
 """
-Ticket delivery — Epson TM-T88V (ESC/POS).
+Ticket delivery — ESC/POS, written against the TM-T88V command reference.
 
 Why this file matters: PRD §12 said the restaurant sees orders on a dashboard.
 Nobody watches a dashboard during a Friday rush. This is how a confirmed order
 physically reaches the kitchen, and — critically — how we learn whether it did.
 
-The T88V answers real-time status queries, so SENT_TO_STORE -> STORE_ACKED is a
-real acknowledgement, not an assumption. A ticket that didn't print becomes a
+T-049 (2026-09-22): the dedicated unit that actually arrived is labeled
+**Epson M347C**, not a TM-T88V. Epson's M-number -> TM-series mapping is not
+publicly documented and this repo has never had the device reachable from a
+session that could inspect it (checked: no USB/serial/network path to it from
+this environment — see STATUS.md's T-049 entry). Status-bit semantics, paper
+width, and cut-command support below are UNVERIFIED against the real M347C —
+they are the TM-T88V spec's assumptions, unconfirmed. Do not treat a clean
+`dispatch()` return as proof this byte-level protocol is correct on real
+hardware; it only proves the dry-run/state-machine logic around it is.
+
+The status-query design (DLE EOT, answered even mid-job) is real for genuine
+TM-series printers in general, so SENT_TO_STORE -> STORE_ACKED is meant to be
+a real acknowledgement, not an assumption — but that meaning depends on the
+still-unverified assumption above. A ticket that didn't print becomes a
 FAILED_DISPATCH that pages someone, instead of a lost order nobody knows about.
 """
 

@@ -23,7 +23,7 @@ graph TD
     O --> C[coupons.py<br/>4 offers, exclusive]
     P --> M[menu.py<br/>pure data, screenshot-verified]
     C --> P
-    O -.CURRENT: dry_run only.-> PR[printer.py<br/>ESC/POS TM-T88V]
+    O -.CURRENT: dispatch wired, dry_run default; ESC/POS model unverified.-> PR[printer.py<br/>ESC/POS, Epson M347C]
     CF[config.py<br/>env only] --> O
 ```
 
@@ -160,7 +160,7 @@ properties:
 |---|---|---|
 | Telephony | Twilio or Telnyx | low — DID portable |
 | Voice agent (ASR/LLM/TTS) | **decision pending — ADR-004** | medium; keep behind an interface |
-| Printer | Epson TM-T88V, ESC/POS over tcp/9100 | none, open protocol |
+| Printer | Epson M347C, ESC/POS over tcp/9100 (TM-T88V command reference — model mapping UNVERIFIED, see T-049) | none, open protocol |
 | POS | PrISM — **no integration**, staff re-key | none by design |
 
 Provider types must not appear in `pricing.py`, `orders.py`, or `menu.py`.

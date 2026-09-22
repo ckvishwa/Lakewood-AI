@@ -186,6 +186,12 @@ class PersistentChat:
     from_number: str
     chat: ChatState | None
     resume_offer: oe.Session | None = None
+    # T-049: the one real dispatch route a confirmed order reaches paper
+    # through — None (default) keeps every caller that doesn't pass one
+    # (tests, evals, any store without a printer configured yet) exactly as
+    # before. See `persistence.service.confirm_and_persist`'s own docstring
+    # for the idempotency guarantee this relies on.
+    printer: object | None = None
 
     def _executor(self, name, args, fn, session):
         if name == "confirm_order":
@@ -193,7 +199,8 @@ class PersistentChat:
             # never exposes either quote_id or this stable call/quote retry key.
             key = args.get("idempotency_key") or f"confirm:{session.call_id}:{args['quote_id']}"
             args["idempotency_key"] = key
-            return confirm_and_persist(self.repo, session, args["quote_id"], key)
+            return confirm_and_persist(self.repo, session, args["quote_id"], key,
+                                       printer=self.printer)
         result = fn(session, **args)
         if result.get("status") == "ok" and name not in {"search_menu", "check_availability", "get_store_info"}:
             save_progress(self.repo, session)
@@ -231,12 +238,12 @@ class PersistentChat:
 
     @classmethod
     def start(cls, repo: SessionRepository, inbound_did: str, call_id: str,
-              from_number: str) -> "PersistentChat":
+              from_number: str, printer: object | None = None) -> "PersistentChat":
         store_id = store_for_did(inbound_did)
         session, offer = resume_or_create(repo, store_id, call_id, from_number)
         # An offered cart is deliberately not attached until the caller says so.
         obj = cls(repo, store_id, call_id, from_number, None,
-                   session if offer else None)
+                   session if offer else None, printer)
         if offer is None:
             obj.chat = obj._state(session)
         return obj

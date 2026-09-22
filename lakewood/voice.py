@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from .chat import PersistentChat, make_interpreter
 from .config import CONFIG
 from .persistence.memory_repository import InMemorySessionRepository
+from .printer import TicketPrinter
 from .stt.base import STTCallError
 from .stt.faster_whisper_provider import make_stt_provider
 from .tts import make_tts_provider
@@ -88,7 +89,15 @@ def report_latency(turns: list[VoiceTurn]) -> str:
     return "\n".join(lines)
 
 def main():
-    call=PersistentChat.start(InMemorySessionRepository(), CONFIG.inbound_did, "VOICE-LOCAL", "+10000000000")
+    # T-049: PRINTER_DRY_RUN defaults to "1" (see config.py) — a confirmed
+    # order still runs the full dispatch path and prints to the in-process
+    # dry-run buffer, it just never opens a real socket/device. Real
+    # hardware bring-up here is opt-in via PRINTER_HOST/PRINTER_DEVICE +
+    # PRINTER_DRY_RUN=0, never the other way around.
+    printer = TicketPrinter(host=CONFIG.printer_host, port=CONFIG.printer_port,
+                            device=CONFIG.printer_device, dry_run=CONFIG.printer_dry_run)
+    call=PersistentChat.start(InMemorySessionRepository(), CONFIG.inbound_did, "VOICE-LOCAL",
+                              "+10000000000", printer=printer)
     loop=LocalVoiceLoop(call, make_stt_provider(), make_tts_provider(), SoundDeviceMicrophone())
     print("LAKEWOOD LOCAL VOICE (Enter records 5 seconds; type quit to exit)")
     turns: list[VoiceTurn]=[]

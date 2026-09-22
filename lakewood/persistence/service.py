@@ -55,13 +55,38 @@ def save_progress(repo: SessionRepository, session: oe.Session) -> None:
 
 
 def confirm_and_persist(repo: SessionRepository, session: oe.Session, quote_id: str,
-                        idempotency_key: str | None = None) -> dict:
+                        idempotency_key: str | None = None, printer=None) -> dict:
     """F6 (idempotent confirm), extended across a process restart. `Session
     .idempotency` only protects a replay within the same in-memory object —
     exactly the gap a dropped connection after a successful `confirm_order`
     but before the customer heard the confirmation would expose. Checking
     `confirmed_orders` FIRST closes it: a retried confirm after a restart
     finds the original order, never a second one.
+
+    T-049: `printer`, when given, is dispatched to exactly once — only on
+    the branch below that actually just confirmed THIS order, never on the
+    early-return replay-cache-hit branch above. That is the whole
+    idempotency guarantee for "one confirmed order, one ticket": a retried/
+    replayed confirm_order (same idempotency_key) returns before this
+    function ever reaches the dispatch call. `dispatch_confirmed_order`
+    itself is the second layer — it requires `session.state == "CONFIRMED"`
+    and immediately transitions it away, so even a caller that reached this
+    branch twice on the same live session object (not a real code path
+    today, but not assumed away either) cannot double-print.
+
+    A dispatch failure is a kitchen/staff-side problem, not a reason to
+    retract the customer's already-valid confirmation — `result` (the
+    customer-facing ok payload) is returned unchanged regardless of dispatch
+    outcome; `dispatch_confirmed_order` logs the real outcome on `session`
+    itself (see its own docstring) for anything that reads session state/
+    events, and never raises past this function.
+
+    Known gap, disclosed not fixed here (no `confirmed_orders` schema field
+    tracks dispatch status): if the process crashes between `finalize_session`
+    and the dispatch attempt completing, a replayed confirm hits the cache
+    branch above and returns without ever retrying dispatch — the order is
+    durably confirmed but may never reach paper. Out of this task's time box;
+    would need a persisted dispatch-status column to close.
     """
     if idempotency_key:
         existing = repo.get_confirmed_order_by_idempotency_key(
@@ -86,4 +111,7 @@ def confirm_and_persist(repo: SessionRepository, session: oe.Session, quote_id: 
             session_snapshot=session_to_dict(session),
         )
         repo.finalize_session(session, record)
+        if printer is not None:
+            from ..printer import dispatch_confirmed_order
+            dispatch_confirmed_order(session, printer)
     return result

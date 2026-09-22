@@ -2,7 +2,64 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
-## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection — RECOMMENDED NEXT
+## T-050 · VAD/endpointing to replace the fixed 5-second voice capture window — RECOMMENDED NEXT
+
+**Priority:** 5 · **Status:** Not started (filed 2026-09-22, from T-049)
+
+**Found in the T-038 Phase 2 real-hardware run** (see STATUS.md): median
+end-to-end turn latency was 5.899 s, of which the fixed 5-second microphone
+capture window (`SoundDeviceMicrophone.capture`, `lakewood/voice.py`) is
+~5.2 s — the dominant cost by a wide margin. Real processing after capture
+was ~0.688 s median. Replacing the fixed window with voice-activity
+detection or push-to-stop endpointing removes ~4+ seconds from every turn
+without touching STT/TTS/app latency at all — the single highest-leverage
+remaining latency fix, and the difference between a demo that impresses and
+one that drags.
+
+**Scope.** `SoundDeviceMicrophone`/`LocalVoiceLoop` in `lakewood/voice.py`
+only — no interpreter, prompt, or domain changes. Silence-based endpointing
+(a VAD library or a simple energy-threshold cutoff) is the pragmatic MVP
+choice per CLAUDE.md's "buy, don't build" guidance for non-moat concerns;
+push-to-stop (a key/button) is the zero-dependency fallback if a VAD
+dependency isn't wanted yet.
+
+**Acceptance.** A real turn's capture time is bounded by actual speech end,
+not a fixed timer; median/p95 latency re-measured on real hardware and
+compared against the T-038 Phase 2 baseline above; offline suite stays
+green (this module has no interpreter-facing surface, so no eval re-run is
+expected, but confirm and say so explicitly either way).
+
+## T-049 · Printer hardware bring-up + end-to-end dispatch — **PARTIAL, hardware-blocked (2026-09-22)**
+
+**Priority:** 1 · **Status:** Part 3 (dispatch wiring) done and offline-verified;
+Parts 1/2/4 (real hardware verification, real print, live demo) HARD-BLOCKED
+
+See `docs/STATUS.md`'s T-049 entry for the full account. Short version: this
+session has no USB/network path to the restaurant's printer (checked and
+confirmed with the owner in-session), so the ESC/POS byte-level protocol
+against the real **Epson M347C** remains unverified — `lakewood/printer.py`'s
+TM-T88V-spec assumptions are unchanged and now explicitly flagged as such in
+its own module docstring. `dispatch_confirmed_order` is now wired into the
+real `PersistentChat`/persistence path (previously it was written but never
+called from anywhere), with idempotency and failure-safety proven by 13 new
+tests in `tests/test_printer_dispatch.py`.
+
+**Remaining scope, blocked on hardware access:** M347C -> TM-series model
+mapping (paper width, cut command, status-bit semantics, connection type);
+a real ticket printed and checked against physical paper; paper-out/
+cover-open/offline observed on the real device (currently only exercised
+via a status-overriding fake printer, not hardware); the live spoken-order
+-> printed-ticket demo. Resume this task once the printer is reachable —
+either physically connected to a session with tool access, or the owner
+runs the physical steps and reports results back for verification.
+
+**Known gap, disclosed not fixed:** no `confirmed_orders` schema field
+tracks dispatch status — a process crash between `finalize_session` and
+dispatch completing means a replayed confirm returns the cached "ok" without
+ever retrying dispatch. Needs a persisted dispatch-status column; out of
+this task's time box.
+
+## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection
 
 **Priority:** 0 · **Status:** Not started (filed 2026-09-08, still open)
 

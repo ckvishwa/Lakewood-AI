@@ -24,6 +24,76 @@ execution.
 
 ## Current phase
 
+**T-049 PARTIAL, 2026-09-22 (P1): dispatch wiring done and offline-verified;
+hardware bring-up HARD-BLOCKED — no path to the real printer from this
+session.** Preconditions confirmed first: T-044 committed and pushed
+(`32da80c`), clean tree, HEAD matches origin.
+
+**Part 1 (model verification) could not be completed.** This coding-agent
+session runs on a Windows machine with no physical or network path to the
+restaurant's printer: `Get-PnpDevice` finds no Epson/USB-printer device,
+`Get-Printer` lists none, the LAN ARP table is empty, `PRINTER_HOST` is
+unset, and a web search could not confirm what TM-series command set an
+Epson **M347C** label corresponds to (Epson does not publish the M-number
+mapping). STATUS.md's own prior entry said the dedicated unit was still "in
+transit" — it may now be on-site at the restaurant, but that is a different
+machine than this session runs on. Asked the owner directly (in-session):
+confirmed no USB/network access is available right now either. **Parts 1, 2,
+and 4 (real hardware verification, a real printed ticket, the live demo) are
+therefore UNVERIFIED, not done** — `lakewood/printer.py`'s ESC/POS byte-level
+assumptions remain exactly what T-043/prior docs already said: written from
+the TM-T88V spec, never run against real hardware, now additionally flagged
+because the real device's model label doesn't match that spec's name at all
+(see the module docstring).
+
+**Part 3 (end-to-end dispatch wiring) is done, offline-verified, no hardware
+needed for any of it.** `dispatch_confirmed_order` was never wired into any
+real call path before this task — `PersistentChat._executor`'s `confirm_order`
+branch called `confirm_and_persist` directly with no printer involved at all.
+Now: `PersistentChat` takes an optional `printer` field (default `None`,
+so every existing caller — tests, evals — is unaffected); `confirm_and_persist`
+accepts an optional `printer` and dispatches exactly once, only on the branch
+that actually just confirmed the order (never on the F6/idempotency-key
+cache-hit replay branch above it) — that ordering IS the "one confirmed
+order, one ticket" guarantee, proven by test
+(`test_confirm_and_persist_dispatches_exactly_once_across_a_replay`,
+`test_dispatch_is_not_re_entrant_on_an_already_dispatched_session`). A
+dispatch failure moves `session.state` to `FAILED_DISPATCH` and is logged on
+the session, but never overwrites the customer-facing `confirm_order` result
+— the customer's confirmation is real regardless of what happens in the
+kitchen (`test_dispatch_failure_does_not_leak_into_the_customer_facing_
+confirm_result`, `test_run_turn_confirm_order_reply_unaffected_by_a_failed_
+dispatch`). `python -m lakewood.voice` now constructs a real `TicketPrinter`
+from `CONFIG` (`PRINTER_HOST`/`PRINTER_DEVICE`/`PRINTER_DRY_RUN`, still
+defaulting to dry-run) and passes it through — the wiring exists end-to-end,
+only the far end (real bytes reaching real paper) is unverified. 13 new
+tests in `tests/test_printer_dispatch.py` (`lakewood/printer.py` had ZERO
+tests before this task, at any layer, including `PrinterStatus.ready`).
+
+**Known gap, disclosed not fixed (time-boxed out):** no `confirmed_orders`
+schema field tracks dispatch status. If the process crashes between
+`finalize_session` and dispatch completing, a replayed confirm hits the
+idempotency-key cache branch and returns without ever retrying dispatch —
+durably confirmed in the database, but possibly never sent to the printer.
+Closing this needs a persisted dispatch-status column and a retry sweep; out
+of this task's scope.
+
+**Gates run, all offline (no live LLM N=3 — this task touched no prompt,
+tool description, or provider surface, so none was needed):**
+```
+python -m pytest --no-header -q        → 629 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged from T-044)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+python -c "from lakewood.voice import main"       → imports clean, no hardware touched
+```
+
+**Docs corrected:** `ARCHITECTURE.md`'s printer row said "Epson TM-T88V" as
+if confirmed — corrected to "Epson M347C... model mapping UNVERIFIED."
+`lakewood/printer.py`'s module docstring now states the model mismatch
+explicitly instead of asserting TM-T88V as fact. Neither moved to fully
+CURRENT — the wiring/idempotency logic did; the byte-level protocol did not.
+
 **T-044 done, 2026-09-22 (P1): `_has_pizza_intent` no longer requires the
 whole utterance to be pizza-shorthand.** Preconditions confirmed first:
 two live Codex WSL app-server processes were found pointed at this exact
