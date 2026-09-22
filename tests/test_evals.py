@@ -168,13 +168,52 @@ CASES = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # correction). Full live-gate evidence: `docs/STATUS.md`'s T-041 live-gate
 # entry.
 #
+# Raised to 59/91 (T-044, ADR-017's fourth amendment): `_has_pizza_intent`
+# required the ENTIRE utterance to be pizza-shorthand, which wrongly
+# refused the single most common real order shape — a pizza combined with
+# ANYTHING else in one breath (a drink, a side, ordinary filler like
+# "I'll pick it up"). Replaced with two conditions: positive pizza evidence
+# in some clause, AND no unresolved product-bearing word left over anywhere
+# else in the utterance (a genuinely separate, fully-named menu item, e.g.
+# "and a twelve piece wings", does not block; an unresolved/partial one,
+# e.g. "and a chicken caesar wrap", still does). +1 genuine flip
+# (`SLANG-001`, "gimme a lg pep" — needed both the new evidence logic and a
+# real "pep" -> PEPPERONI alias, T-039-style spoken-form addition, not a
+# grammar change). Checked directly, case ID for case ID, against the full
+# prior 58-case pass set: zero regressions (two near-misses were found and
+# fixed BEFORE this number was raised, not glossed over: `AVAIL-002`/
+# `INVALID-003`, a single bare gourmet-number order like "small number
+# five" — `RuleBasedInterpreter` has no branch for that shape at all, only
+# half-and-half-by-number — briefly looked pizza-shaped when "number" was
+# tried as general filler, which would have created a plain CHEESE PIZZA
+# instead of correctly falling through to search_menu; fixed by scoping
+# "number"/digit consumption to the specific gourmet number actually being
+# authorized, never a blanket filler word. `CORRECT-002`/`NONPIZZA-003`
+# — comma-based clause splitting let a bare size fragment in its own
+# comma-separated clause ("a garden salad, MEDIUM, with grilled chicken")
+# count as its own clean pizza clause, and let "garden salad" read as a
+# separate, fully-resolved item standing next to it — reopening the
+# original substitution shape. Fixed two ways: clause splitting narrowed to
+# " and " only (a comma is routinely just a spoken pause inside ONE item's
+# description, "and" is what customers actually use to join two distinct
+# orders), and a bare size word alone, with nothing else in its clause, no
+# longer counts as pizza evidence by itself ("'small' is also a real GARDEN
+# SALAD SM size" — the same reasoning the ORIGINAL gate already relied on,
+# now enforced per-clause too — "actually make it large" must not read as
+# a request for a NEW pizza). Full mechanism, the gourmet-number direct-
+# evidence gap (`CORRECT-004`/`GOURMET-013`, previously required a PRIOR
+# search_menu hit even when the utterance plainly said "number ten"), and
+# `_new_pizza_half_a_half_b` brought under the same evidence check as the
+# other five `add_item` call sites: `docs/decisions/ADR-017-no-silent-item-
+# substitution.md`'s T-044 amendment; `tests/test_t044_pizza_intent.py`.
+#
 # Raise this number ONLY after running the real command and confirming the
 # new count:
 #     python evals/runner.py score --adapter rule_based
 # Never lower it to hide a real interpreter regression — a corrected,
 # previously-wrong label is not that; never raise it to a number you
 # haven't actually observed either.
-RULE_BASED_BASELINE = 58
+RULE_BASED_BASELINE = 59
 
 
 def test_all_golden_labels_are_valid():

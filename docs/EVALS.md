@@ -903,6 +903,76 @@ residual overlap gap to T-032's band is a collection of already-tracked,
 unrelated model-capability limitations, not a reason to keep gating
 hardware work on this specific substitution-safety measurement."
 
+## T-044 pizza-intent fix, live N=3 re-acceptance gate, 2026-09-22
+
+**Verdict: the T-043-identified `_has_pizza_intent` defect is closed.
+Historical overlap recovered to 53.33/73, essentially the T-032 pre-guard
+band (54.33/73), with the zero-substitution guarantee fully intact.**
+
+Preconditions confirmed first (per T-043's own outstanding action item):
+two live Codex WSL app-server processes were found pointed at this exact
+repo directory and killed; `EXPLABS_API_KEY` confirmed rotated; clean
+baseline confirmed (HEAD `514b1c4`, matches origin). Ran
+`LAKEWOOD_LLM_PROVIDER=experiential` (`gpt-5.6-luna`) against the full
+91-case corpus three times sequentially, no code/prompt/label changes
+between runs, HEAD unchanged start-to-end every run:
+
+```
+                 full/91 (raw)  overlap/73  DIRECT_UTTERANCE_EVIDENCE  UNSUPPORTED_ITEM_SUBSTITUTION  bypass
+Run 1            74             56          58                         19                              0
+Run 2            70             53          56                         14                              0
+Run 3            68             51          52                         15                              0
+mean             70.67          53.33       55.3                       16.0                            0
+```
+
+**Substitutions: 0/0/0**, structurally verified — every `add_item` across
+all 3 runs scanned for an `ok` result whose `authorization_reason` falls
+outside the three authorized codes; zero found, every run.
+
+**Overlap/73: 53.33, up from T-041's 47.0 (+6.33), essentially matching
+T-032's pre-guard 54.33/73** — not exceeding it, so no "exceeding needs
+explaining" caveat applies. The rejection ratio stayed evidence-favoring
+in every run (`DIRECT_UTTERANCE_EVIDENCE` 52-58 vs `UNSUPPORTED_ITEM_
+SUBSTITUTION` 14-19), the same healthy shape T-041 first established, now
+recovered further.
+
+**Which of T-043's 11 named regressed cases flipped, measured directly
+from the raw traces (not assumed):**
+
+| Case | 3/3 this gate? | Note |
+|---|---|---|
+| `MULTI-001` | pass | |
+| `GOURMET-013` | pass | needed the case-sensitivity fix below too |
+| `CORRECT-003` | pass | |
+| `SLANG-001` | pass | needed the new `"pep"` alias |
+| `MULTI-005` | pass | |
+| `SLANG-003` | pass | |
+| `CORRECT-006` | pass | |
+| `ADV-001` | fail 3/3 | pizza created correctly every run; model self-applies an unrequested coupon — unrelated, filed separately |
+| `MOD-035` | fail 3/3 | pizza created correctly every run; model calls `add_item` for a `FLAT_MODIFIER` instead of `add_modifier` — correctly refused, unrelated |
+| `NEG-005` | fail 3/3 | pizza+topping created correctly every run; model duplicates a modifier on an intensity change instead of replace — unrelated |
+| `CORRECT-004` | fail 3/3 | turn 1 now authorizes correctly; turn 2's own text has no size word (context-carryover gap) — unrelated |
+
+7/11 fully fixed; the other 4 have the pizza-intent defect itself
+confirmed closed in every trace, with a separate, already-filed-elsewhere
+defect blocking the rest of the case.
+
+**Two bugs this live gate found that the offline unit tests (all-
+lowercase, single-size fixtures) could not:** case-sensitivity in the
+gourmet evidence branch (real sentence case like "Hawaiian" never matched
+the lowercase vocab) and `_size_supported_by_utterance` picking only the
+first-found size word in a two-different-sizes multi-item utterance. Both
+fixed same-task; full mechanism in ADR-017's T-044 amendment.
+
+**Provider usage across the 3 runs:** 405/395/384 requests, ~533K/518K/
+501K total tokens, mean latency 2.30s/2.57s/2.54s, $0.00 provider-reported
+cost on every request. Schema violations: 0 in every run.
+Hallucinated-SKU calls (safe domain-layer rejections, never mutations):
+41/47/37.
+
+Trace files: `evals/traces/20260922T130733_llm.jsonl`,
+`.../20260922T132543_llm.jsonl`, `.../20260922T134314_llm.jsonl`.
+
 ## Release gate
 
 **This is the future production-model gate (PLANNED — no real `score

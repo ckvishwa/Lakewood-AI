@@ -3,10 +3,12 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-18, live N=3 Experiential re-acceptance gate for
-T-041 (`gpt-5.6-luna`), branch `codex/parakeet-stt`. Real GPU numbers in
-the T-038 Phase 2 entry below were measured separately on the owner's
-Windows/WSL hardware and are unaffected by this task.
+Last verified: 2026-09-22, live N=3 Experiential re-acceptance gate for
+T-044 (`gpt-5.6-luna`), branch `codex/parakeet-stt`, on a confirmed-clean
+repo (Codex processes pointed at this directory killed first, `EXPLABS_API_KEY`
+rotated, HEAD unchanged start-to-end all 3 runs — see T-044 entry below).
+Real GPU numbers in the T-038 Phase 2 entry below were measured separately
+on the owner's Windows/WSL hardware and are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -21,6 +23,156 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-044 done, 2026-09-22 (P1): `_has_pizza_intent` no longer requires the
+whole utterance to be pizza-shorthand.** Preconditions confirmed first:
+two live Codex WSL app-server processes were found pointed at this exact
+repo (`--cd /mnt/d/Projects/Ai`, cwd matching T-043's own finding) and
+killed; `EXPLABS_API_KEY` confirmed rotated by the owner; clean baseline
+(`git status`, HEAD `514b1c4`, matches origin) confirmed before any code
+change.
+
+**The trap the task warned about, avoided by construction:** switching to
+"positive pizza evidence present, alone" (the obvious fix) would have
+reopened the original T-038/ADR-017 P0 — every one of those utterances
+contains a real topping word. Fixed with the two-condition rule instead:
+positive evidence AND no unresolved product-bearing word left over
+anywhere else in the utterance, enforced **per clause** (split on `" and
+"` only, not comma — a comma is routinely just a spoken pause inside ONE
+item's description, "and" is what customers actually use to join two
+distinct orders). A clause resolves to "not blocking" two ways, both
+menu-sourced, no hand-maintained noun list anywhere: `oe.non_pizza_alias_
+hits` (the same alias table `search_menu` uses) or `oe.non_pizza_full_
+name_match` (the clause's own words, filler/quantity stripped, EXACTLY
+cover one real item's identifying words — a partial match like "chicken
+caesar wrap" against WRAP's `{wrap}` is deliberately NOT a match, "chicken"/
+"caesar" stay unexplained). A shared word (e.g. "chicken", a topping AND
+part of "CHICKEN DINNER") is always consumed as pizza vocabulary first —
+only the item's OTHER distinguishing words carry blocking weight.
+
+Brought the sixth `add_item` call site (`_new_pizza_half_a_half_b`,
+T-043's one named unshared exception) under real evidence checks: `a`/`b`
+must both resolve to real toppings (`oe.ALL_TOPPINGS` membership) AND the
+full utterance must still pass `_has_pizza_intent` — no longer just "the
+regex matched." `_half_and_half_by_number` (call site #2) got the same
+check added, defense-in-depth (not a response to an observed defect
+there). The LLM path's gourmet-number branch, which previously had **no**
+direct-evidence path at all (skipped whenever `gourmet_number` was set,
+requiring a prior `search_menu` round trip even for "medium number ten") —
+closed via `_pizza_creation_authorized`, reusing the same two-condition
+predicate.
+
+**Two regressions found and fixed by the offline ratchet before the
+number was raised, not glossed over:** making "number" general filler
+briefly let "small number five" (no "half" phrasing — `RuleBasedInterpreter`
+has no bare-single-gourmet-number branch) look like a plain cheese order;
+scoped the strip to only the specific number(s) actually being authorized.
+Comma-based clause splitting let a bare size fragment in its own comma
+clause ("a garden salad, MEDIUM, with grilled chicken") count as its own
+clean pizza clause, reopening the substitution shape; fixed by splitting
+on `" and "` only, and by requiring a clause have MORE than a bare size
+word before it counts as evidence ("actually make it large," a pure size
+correction, must not read as a new pizza).
+
+**Two more found by the live gate itself, not offline (the offline unit
+tests used all-lowercase fixtures and single-size-per-utterance
+utterances — neither shape surfaces these):** `_pizza_creation_
+authorized`'s gourmet branch called the residual/clause machinery on
+un-lowercased text, so real sentence case ("Hawaiian", "BBQ Chicken")
+never matched the lowercase vocab and GOURMET-013 was wrongly refused
+live despite passing offline — fixed by lowercasing once at entry.
+`_size_supported_by_utterance` picked whichever size word `_find_size`
+matches first (longest-vocab-first, not utterance position), so a genuine
+two-different-sizes multi-item order ("one small cheese and one medium
+cheese pizza") could only ever satisfy ONE of its own two `add_item`
+calls — fixed via `_size_word_matches` (membership: does the PROPOSED
+size's own alias appear anywhere, not "is it the one found first").
+
+**Offline gates, all green, fresh commands this task:**
+```
+python -m pytest --no-header -rA          → 613 passed, 2 skipped, 2 xfailed (was 583)
+python evals/runner.py validate            → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (was 58; +1 genuine flip, SLANG-001,
+                                              "gimme a lg pep" — zero regressions, checked case ID
+                                              for case ID against the full prior 58-case pass set)
+python -m pytest tests/test_pricing_parity.py → 50/50
+```
+
+**Live N=3, `LAKEWOOD_LLM_PROVIDER=experiential`/`gpt-5.6-luna`, identical
+config, sequential, HEAD `514b1c4` unchanged start-to-end every run:**
+
+```
+                 full/91 (raw)  overlap/73  DIRECT_UTTERANCE_EVIDENCE  UNSUPPORTED_ITEM_SUBSTITUTION  bypass
+Run 1            74             56          58                         19                              0
+Run 2            70             53          56                         14                              0
+Run 3            68             51          52                         15                              0
+mean             70.67          53.33       55.3                       16.0                            0
+```
+
+**Substitutions: 0/0/0, structurally verified** — every `add_item` call
+across all 3 runs scanned programmatically for an `ok` result whose
+`authorization_reason` falls outside the three authorized codes; zero
+found in every run (same methodology as T-039/T-041's own checks).
+
+**Overlap/73 recovered to 53.33, essentially back at the T-032 pre-guard
+band (53/54/56, mean 54.33)** — up from T-041's 47.0 (+6.33), achieved
+with the same zero-substitution guarantee T-041 already had. Not
+exceeding 54.33, so the task's "exceeding needs explaining" caveat doesn't
+apply.
+
+**Which of the 11 named regressed cases (T-043's own list) flipped,
+measured — not assumed:** 7 of 11 now pass reliably, 3/3 across all three
+runs: `MULTI-001`, `GOURMET-013`, `CORRECT-003`, `SLANG-001`, `MULTI-005`,
+`SLANG-003`, `CORRECT-006`. The other 4 still fail 3/3 — but traced
+directly in every run's raw trace, the PIZZA itself is now correctly
+created via `DIRECT_UTTERANCE_EVIDENCE` in all 4; the remaining failure in
+each is a separate, unrelated defect, not a pizza-intent block:
+- `ADV-001` — pizza created correctly, then the model self-applies an
+  unrequested `FREE_2L` coupon the customer never asked for (the actual
+  labeled ask, "only charge me ten dollars," was a price-manipulation
+  probe the model deflected by finding SOME discount instead of refusing).
+- `MOD-035` — pizza created correctly, then the model calls `add_item`
+  for "SIDE RANCH" (a `FLAT_MODIFIER`, not a `NON_PIZZA` item) instead of
+  `add_modifier` — a model tool-choice mistake, correctly refused by the
+  guard exactly as designed (a modifier name is not a valid `add_item`
+  target), not a substitution.
+- `NEG-005` — pizza and pepperoni created correctly, then "make the
+  pepperoni light" adds a SECOND, LITE pepperoni modifier instead of
+  removing the NORMAL one first and re-adding as LITE (the domain's own
+  `_resolve_intensity_calls` logic that `RuleBasedInterpreter` gets for
+  free; the LLM path has no equivalent and nothing in the system prompt
+  asks for it).
+- `CORRECT-004` — turn 1 ("medium number ten") now correctly authorizes
+  via `DIRECT_UTTERANCE_EVIDENCE`; turn 2 ("actually give me number eight
+  instead") fails because THAT turn's own isolated text has no size word
+  at all (the model re-passes `size=MEDIUM` from conversation memory, but
+  `_size_supported_by_utterance` only ever looks at the current turn's
+  text) — a same-size-correction context-carryover gap, pre-existing,
+  unrelated to product-word blocking.
+
+None of these four is a substitution or a pizza-intent failure; each is
+filed as its own task below rather than folded into T-044's scope (a
+correction-flow size-context gap, a coupon-self-application guard, an
+intensity-change duplicate-modifier bug, and a modifier-vs-item tool-
+choice guard are four different mechanisms, not variations on one fix).
+
+**Incidental finding, filed not fixed (out of T-044's scope — this task is
+the PIZZA-intent gate, not non-pizza SKU evidence coverage):** a non-pizza
+item whose canonical name has no `NON_PIZZA_ALIASES` entry (e.g. "12PC
+WINGS" — only drinks/cheesecake have spoken-form aliases) has no direct-
+evidence path of its own in `_authorize_item_creation`; the model must
+`search_menu` it first. Never silently wrong (only refused until
+searched), so this doesn't reopen any P0, but it means a compound order's
+SECOND item ("...and a twelve piece wings") may still cost the model an
+extra turn even though the PIZZA now authorizes immediately.
+
+Full mechanism, the two-condition rule, and every consequence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-044 amendment.
+Regression/safety/mutation tests: `tests/test_t044_pizza_intent.py` (34
+tests). Trace files: `evals/traces/20260922T130733_llm.jsonl`,
+`.../20260922T132543_llm.jsonl`, `.../20260922T134314_llm.jsonl`.
+
+---
 
 **CORRECTION (T-043 audit, 2026-09-22): the T-041 claim directly below —
 "the remaining gap is unrelated model-capability limitations... not

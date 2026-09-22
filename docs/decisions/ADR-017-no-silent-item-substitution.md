@@ -34,7 +34,13 @@ anticipate. `docs/STATUS.md`/`docs/EVALS.md`'s T-041 sections separately
 over-attributed the post-T-041 overlap-score gap to "unrelated model-
 capability limitations" — corrected in those files; not this ADR's own
 claim, but recorded here for the same reason T-039A's history is kept
-visible instead of edited away.
+visible instead of edited away. **Amended a fourth time 2026-09-22
+(T-044), same day.** `_has_pizza_intent`'s whole-utterance-explained design
+(flagged by the T-043 audit above) is replaced by a two-condition rule —
+positive pizza evidence AND no unresolved product-bearing word left over
+anywhere else in the utterance, checked per clause. See "Amendment: two
+conditions, not one whole-utterance check (T-044)" at the end of this
+document.
 
 ## Context
 
@@ -780,3 +786,225 @@ code path in the repository, the week after it was hardened.
 - Live N=3 re-run and full arithmetic (rejection ratio, historical
   overlap vs 40.33/54.33, silent-substitution recount): `docs/STATUS.md`'s
   T-041 live-gate entry.
+
+## Amendment: two conditions, not one whole-utterance check (T-044)
+
+**T-043's audit (`docs/AUDIT_T043.md`, Part 5) found `_has_pizza_intent`
+required the ENTIRE utterance to be pizza-shorthand — a customer combining
+a pizza with anything else in one breath (a drink, a side, ordinary
+filler like "I'll pick it up"/"gimme"/plural "mediums") got wrongly
+refused, on both interpreters.** Reproduced directly, live and offline:
+
+```
+_has_pizza_intent("small cheese and a can of soda")        # False
+_has_pizza_intent("medium cheese, I'll pick it up")         # False
+_has_pizza_intent("gimme a lg pep")                          # False
+_has_pizza_intent("two mediums, plain")                      # False
+_has_pizza_intent("large cheese and a twelve piece wings")   # False
+```
+
+This is the real, primary driver of the T-032->T-041 overlap-score gap
+(54.33 -> 47.0) T-041's own report wrongly attributed to "unrelated
+model-capability limits" (corrected case-by-case in T-043's audit: 11 of
+22 currently-failing overlap cases were genuinely caused by this, not
+pre-existing).
+
+### The trap — read before any fix like this
+
+**The obvious fix — require positive pizza evidence present, full stop —
+reopens the original P0.** Every one of the five original T-038 rows
+(garden salad, calzone, chicken caesar wrap, two-liter-coke, appetizer)
+contains a real topping/size word riding along with the unresolved
+product noun. "Positive evidence alone" would let all five back through.
+
+### Decision (current)
+
+**A pizza may be created only when BOTH hold:** (1) positive, deterministic
+evidence of pizza intent — the literal word "pizza"/"pie" (unconditional),
+a numbered specialty the customer actually referenced, or at least one
+clause that's fully explained as pizza shorthand and is more than a bare
+size word alone; AND (2) no clause anywhere in the utterance contains an
+unresolved product-bearing word.
+
+**Segmentation, not a product-noun vocabulary.** The utterance is split
+into clauses on `" and "` only — deliberately not comma/period, the way
+`_new_pizza`'s own topping-scoping loop splits. A comma is routinely just
+a spoken pause inside ONE item's own description ("a garden salad,
+medium, with grilled chicken" — three fragments of one order, not three
+items); treating every comma as an item boundary let a bare size fragment
+count as its own clean pizza clause and let "garden salad" look like a
+separate, resolved item standing next to it — reopening the substitution
+shape on a real corpus case (`NONPIZZA-003`, caught by the offline ratchet
+before this was narrowed). "And" is the one word customers actually use to
+join two distinct orders in one breath.
+
+**A clause with content left over after pizza-vocabulary/filler stripping
+is "unresolved" — blocking — UNLESS it fully, unambiguously names one
+real, different menu item.** Two menu-sourced checks decide that, never a
+hand-maintained noun list:
+
+- `oe.non_pizza_alias_hits` — the same spoken-form alias table
+  `search_menu` already uses ("can of soda", "two liter", ...).
+- `oe.non_pizza_full_name_match` — the clause's own words (filler/quantity
+  stripped) EXACTLY cover one real `NON_PIZZA` item's identifying words
+  (derived once from `data/menu.json` via `pricing.NON_PIZZA`, size-suffix/
+  quantity-token noise dropped — `_menu_item_identifying_words`). A
+  PARTIAL match is deliberately not a match: "chicken caesar wrap" against
+  WRAP's `{wrap}` leaves "chicken"/"caesar" unexplained, so it does NOT
+  resolve and still blocks — this is exactly what stops the trap cases
+  ("garden salad with pepperoni", "chicken caesar wrap", "calzone with
+  mozzarella" — each contains a topping word, each still refuses).
+
+**Where the vocabulary actually comes from, and the one deliberate
+asymmetry:** there is no separate "product-bearing word" list at all. A
+word that isn't consumed as pizza vocabulary (sizes/toppings/pizza-word/
+gourmet names/intensity/quantity/half-phrasing, all menu-sourced) or
+ordinary connective filler (a small, hand-maintained closed-class list —
+articles, "and"/"with", "please", "gimme", "I'll", "pick up", "yeah",
+"thanks" — explicitly never a menu word, the same kind of list the task
+itself sanctions: "or phrases like 'can I please get' would block every
+order") is UNRESOLVED by default, whether it's a known non-pizza noun
+("salad") or a total unknown ("lobster thing", "mystery special") — both
+block identically. This means the safety property only ever gets MORE
+permissive as the menu grows (a new real item's words become resolvable),
+never opens a silent hole for a word nobody taught the system yet — the
+same guarantee the T-039A denylist replacement already established,
+carried one level deeper.
+
+**Shared words resolve toward pizza, never toward the other item.**
+"chicken" is both a topping (premium tier) and the head of "CHICKEN
+DINNER"; treated as pizza vocabulary first (consumed during stripping),
+so it never counts as evidence FOR "chicken dinner" either — only
+"dinner", the word chicken doesn't share, carries blocking weight. "medium
+cheese with chicken" never blocks; "a chicken dinner" still does (via
+"dinner").
+
+**A genuinely separate, fully-named second item does not block — this is
+the actual compound-order case the fix exists for.** "large cheese and a
+twelve piece wings" resolves the wings clause via `non_pizza_full_name_
+match` (its own words, after normalization, exactly equal `12PC WINGS`'s
+identifying words) and authorizes the pizza. "large cheese and a garden
+salad" resolves the salad clause too — even though GARDEN SALAD SM/LG are
+themselves size-ambiguous, that ambiguity is a downstream `search_menu`/
+clarification question for the salad, never a reason to block the pizza
+clause standing next to it.
+
+**A bare size word alone, with nothing else in its clause, is deliberately
+NOT sufficient positive evidence** — "'small' is also a real GARDEN SALAD
+SM size," the same reasoning the ORIGINAL gate already relied on, now
+enforced per clause: "actually make it large" (a pure size correction, no
+topping/pizza word anywhere) must not read as a request for a brand-new
+pizza just because "make"/"it"/"actually" are ordinary filler. Found by
+the offline ratchet regressing `CORRECT-002` before this was added.
+
+**Gourmet numbers got a real direct-evidence path for the first time.**
+Before this task, `_authorize_item_creation`'s pizza branch skipped direct
+evidence ENTIRELY whenever `gourmet_number` was set — "medium number ten"
+had no way to authorize without a prior `search_menu` round trip, even
+though the utterance plainly states the number. `_pizza_creation_
+authorized` extends the same two-condition rule: the customer must have
+referenced THIS specific number (`#N`/"number N", or the specialty's own
+name) for each of `gourmet_number`/`second_gourmet_number`, and the
+remaining utterance must still have no unresolved product word (the
+matched number references themselves are stripped before that check, not
+treated as general filler — see the "AVAIL-002" note below for why that
+distinction matters).
+
+**The sixth call site — `_new_pizza_half_a_half_b` — brought under real
+evidence, closing T-043's one named exception.** `_HALF_A_HALF_B_RE`
+matches ANY two word-groups after "half ... half ..." — before this task,
+nothing checked that `a`/`b` were real toppings at all. Now: `a_name`/
+`b_name` must both be members of `oe.ALL_TOPPINGS`, AND `_has_pizza_intent`
+must hold for the full utterance, before any tool call is proposed —
+otherwise it routes to `search_menu` instead of fabricating a pizza with
+invented topping names. `_half_and_half_by_number` (the digit-pair call
+site) got the same check added too, defense-in-depth, not a response to
+an observed defect there.
+
+### Two regressions found and fixed before any number was raised
+
+- Making "number"/"num" general filler (needed, it seemed, for "medium
+  number ten") briefly let "small number five" — no "half" phrasing,
+  `RuleBasedInterpreter` has no bare-single-gourmet-number branch — look
+  like a plain cheese-pizza request and silently create the wrong item
+  instead of routing to `search_menu` (`AVAIL-002`/`INVALID-003` offline
+  ratchet regressions). Fixed by scoping "number"/digit consumption to
+  the SPECIFIC number(s) `_gourmet_number_referenced` already confirmed
+  the customer said, never a blanket filler word.
+- Comma-based clause splitting broke `CORRECT-002`/`NONPIZZA-003` as
+  described above — fixed by narrowing the split to `" and "` and adding
+  the bare-size-alone exclusion.
+
+### Two more found only by the live gate, not offline
+
+- `_pizza_creation_authorized`'s gourmet branch called the residual/
+  clause machinery on un-lowercased text; `_pizza_shorthand_residual`
+  (like the rest of this file's vocabulary-stripping) has always assumed
+  pre-lowercased input and has no `re.I` of its own. Real sentence case
+  ("Hawaiian", "BBQ Chicken" — the live gate's actual corpus text, not the
+  all-lowercase offline unit fixtures) never matched the lowercase
+  `_GOURMET_NAME_VOCAB`, so `GOURMET-013` was wrongly refused live despite
+  passing every offline test. Fixed by lowercasing once at entry to
+  `_pizza_creation_authorized`.
+- `_size_supported_by_utterance` used `_find_size`, which returns a single
+  best guess (longest-vocab-word-first) for "the" size of one item — a
+  genuine two-item, two-different-sizes utterance ("one small cheese and
+  one medium cheese pizza") can only ever have ONE of its two sizes win
+  that race, so the second `add_item` call was refused as
+  `UNSUPPORTED_ITEM_SUBSTITUTION` even though it was exactly what the
+  customer asked for (`MULTI-001`'s own live trace). Fixed with
+  `_size_word_matches`: does the PROPOSED size's own alias appear
+  ANYWHERE in the utterance — membership, not "is it the one found
+  first." Still refuses a genuinely fabricated size (no alias of which
+  appears anywhere).
+
+### Consequences (T-044)
+
+- `lakewood/orders.py`: `_menu_item_identifying_words`, `NON_PIZZA_
+  IDENTIFYING_WORDS`, `non_pizza_full_name_match` added (menu-sourced,
+  computed once from `pricing.NON_PIZZA`); `"pep"` added to `ALIASES` as a
+  real spoken-form for `PEPPERONI` (same shape as existing `"mozz"`/
+  `"parm"` entries).
+- `lakewood/interpreter.py`: `_CLAUSE_SPLIT_RE`/`_clauses`/`_filler_only_
+  strip`/`_clause_resolves_to_separate_item`/`_no_unresolved_product_
+  words`/`_clause_has_clean_pizza_content` added; `_has_pizza_intent`
+  rewritten on top of them; `_pizza_shorthand_residual` now also consumes
+  `_PIZZA_WORD_RE` matches and a new menu-sourced `_GOURMET_NAME_VOCAB`
+  (specialty names), and its size-vocabulary pass is plural-tolerant;
+  `_find_size` added (plural-tolerant size lookup, replacing `_find_vocab`
+  at every size-detection call site — toppings are unaffected); `_size_
+  word_matches` added, replacing the single-guess logic inside `_size_
+  supported_by_utterance` and `_item_hit_supported_by_utterance`;
+  `_gourmet_number_referenced`/`_pizza_creation_authorized` added;
+  `_authorize_item_creation`'s pizza branch now calls `_pizza_creation_
+  authorized` instead of skipping direct evidence whenever a gourmet
+  number is set; `_new_pizza_half_a_half_b` gained the topping-membership
+  + `_has_pizza_intent` check (now takes the full utterance text as a
+  parameter); `_half_and_half_by_number` gained the same check.
+- `tests/test_t044_pizza_intent.py`: 34 new tests — the 5 T-043
+  utterances plus filler-heavy/word-number variants, all 11 named corpus
+  cases' utterances, every original T-038 P0 row, all three T-039B
+  adversarial cases, the trap cases (each containing a topping/size word),
+  a mutation proof (disabling the product-word check reopens the trap;
+  disabling the gourmet-number-reference check reopens THAT gap
+  specifically), the half-and-half fabricated-topping-name guard, and a
+  curated (not `hypothesis`-generated — not a dependency this repo's
+  offline gate carries) sweep of unresolved-product-word compounds.
+- `tests/test_t041_evidence_vocabulary.py`: the gourmet-spelled-cardinal
+  test's expected reason updated from `UNIQUE_SUPPORTED_SEARCH_RESULT` to
+  `DIRECT_UTTERANCE_EVIDENCE` (the search hit it used is now redundant —
+  a genuinely improved, not weakened, authorization outcome) plus a new
+  test for the no-prior-search shape the old gap actually blocked.
+- `validate`: 91/91, unchanged (no corpus growth this task).
+- Rule-based ratchet: 59/91 (was 58/91). +1 genuine flip (`SLANG-001`,
+  "gimme a lg pep" — needed both the new evidence logic and the real
+  "pep" alias). Checked case ID for case ID against the full prior
+  58-case pass set: zero regressions. Full arithmetic: `tests/
+  test_evals.py`'s baseline comment.
+- Pricing parity: 50/50, unchanged.
+- Full suite: 613 passed, 2 skipped, 2 xfailed (was 583 — 30 new tests,
+  zero regressions).
+- Live N=3 re-run, full arithmetic (rejection ratio, historical overlap
+  vs 47.0/54.33, silent-substitution recount, which of the 11 named cases
+  flipped and why the other 4 didn't): `docs/STATUS.md`'s T-044 live-gate
+  entry.

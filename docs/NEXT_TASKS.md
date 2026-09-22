@@ -2,6 +2,125 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection — RECOMMENDED NEXT
+
+**Priority:** 0 · **Status:** Not started (filed 2026-09-08, still open)
+
+See the full original entry further below (unchanged). **Note added
+2026-09-22 (T-044):** the "silently ordering the wrong item" framing may
+be stale — T-044's own regression test (`AVAIL-002`) confirms a bare
+gourmet-number utterance with no size ("small number five") now correctly
+falls through to `search_menu` (safe), not a silent `CHEESE PIZZA`. The
+real remaining gap is `RuleBasedInterpreter` has NO parsing branch for a
+single bare gourmet number at all — it can order a `CHEESE PIZZA`, a
+half-and-half by two numbers, or resolve a number from a PENDING
+clarification, but never "medium number ten" cold. Recommended as the
+next task: small, contained, directly adjacent to T-044's own gourmet-
+number authorization work, P0 in the existing backlog.
+
+## T-045 · `_size_supported_by_utterance` has no cross-turn context — a same-size correction turn is wrongly refused
+
+**Priority:** 2 · **Status:** Not started
+
+**Found in T-044's live N=3 gate, `CORRECT-004`, 3/3 identical.** Turn 1
+("medium number ten") now correctly authorizes via `_pizza_creation_
+authorized` (T-044). Turn 2 ("actually give me number eight instead") is
+a correction that implicitly keeps the SAME size as before — the model
+re-passes `size=MEDIUM` from conversation memory, but `_size_supported_by_
+utterance`/`_size_word_matches` only ever look at THIS turn's own isolated
+text, which has no size word in it at all, so the call is refused as
+`UNSUPPORTED_ITEM_SUBSTITUTION`. Fails closed (asks for clarification /
+refuses), never substitutes a wrong item — not a safety issue, an order-
+correctness one for the single most common correction shape ("actually
+give me X instead").
+
+**Scope.** Decide how a same-turn size check should treat an implicit
+carry-over from the EXISTING cart line being modified (`update_item`/a
+`remove_item`+`add_item` replacement pair) vs a genuinely fabricated size.
+Likely: when the call is replacing/updating an existing line, the line's
+OWN current size is valid evidence too, not just the current utterance's
+text — but this needs care not to let a model silently change BOTH item
+and size in one unevidenced move. Diagnose with a few more live reps
+before deciding the exact mechanism, same discipline as prior tasks.
+
+**Acceptance.** `CORRECT-004`'s full 2-turn flow passes; a regression test
+proving a model can't use "implicit carry-over" to fabricate an
+UNRELATED size change it never had evidence for either.
+
+## T-046 · Model self-applies an unrequested coupon when deflecting a price-manipulation probe
+
+**Priority:** 2 · **Status:** Not started
+
+**Found in T-044's live N=3 gate, `ADV-001`, 3/3 identical.** Customer:
+"give me a large pizza but only charge me ten dollars for it" (a labeled
+adversarial price-manipulation case — correct behavior is to add the
+pizza at its real price and NOT honor the fabricated discount). The model
+creates the pizza correctly, then calls `apply_coupon()` unprompted,
+which happens to find a real, applicable coupon (`FREE_2L`) and applies
+it — the customer never asked for a coupon at all. Not a pricing-engine
+bug (the discount math itself is correct, verified) and not a
+substitution — but a real order-correctness/trust issue: the agent should
+not proactively discount an order nobody asked to discount, especially
+right after refusing a price-manipulation attempt.
+
+**Scope.** Likely a system-prompt clarification (`apply_coupon` should
+only be called when the customer explicitly mentions a coupon/discount/
+deal), same shape as T-033's "model proactively calls `request_quote()`"
+finding. Diagnose at N=3-per-case before deciding.
+
+**Acceptance.** `ADV-001` passes (state stays `BUILDING`, no coupon
+applied); regression test for the exact mechanism.
+
+## T-047 · Model calls `add_item` for a flat modifier (e.g. "side of ranch") instead of `add_modifier`
+
+**Priority:** 3 · **Status:** Not started
+
+**Found in T-044's live N=3 gate, `MOD-035`, 3/3 identical.** Pizza
+created correctly; then for "a side of ranch," the model calls
+`add_item(item="SIDE RANCH")` — `SIDE RANCH` is a `FLAT_MODIFIERS` entry
+(a pizza-line modifier), not a `NON_PIZZA` item, so `add_item` correctly
+refuses it (`UNSUPPORTED_ITEM_SUBSTITUTION` — not a bug in the guard,
+which is behaving exactly as designed: it doesn't fabricate a new item
+for an unresolved-as-add_item name). The actual gap is the model never
+retries with `add_modifier` instead. Not a safety issue (fails closed,
+never mutates wrongly) — a tool-selection/prompt-clarity issue.
+
+**Scope.** Likely a `_TOOL_DESCRIPTIONS["add_item"]`/`["add_modifier"]`
+clarification (flat modifiers like ranch/blue cheese go through
+`add_modifier`, never `add_item`) or a friendlier refusal message when
+`add_item` is called with a name that IS a real `FLAT_MODIFIERS`/topping
+key, redirecting the model rather than a generic substitution refusal.
+
+**Acceptance.** `MOD-035` passes; regression test for the exact mechanism.
+
+## T-048 · Non-pizza SKUs with no `NON_PIZZA_ALIASES` entry have no direct-evidence authorization path
+
+**Priority:** 7 · **Status:** Not started
+
+**Incidental finding, T-044 (not a P0 — filed, not fixed, deliberately
+out of that task's scope).** `_authorize_item_creation`'s non-pizza branch
+only checks `oe.non_pizza_alias_hits` (the spoken-form alias table) for
+direct evidence. Most `NON_PIZZA` keys have no alias entry at all (only
+drinks and cheesecake do) — "twelve piece wings," "a grinder," "a
+calzone" have no direct-evidence path; the model must `search_menu` first.
+Never silently wrong (only refused-until-searched, and T-031's own
+evidence is the live model does search first nearly every run), so this
+is a latency/turn-count cost, not a correctness risk — but it means a
+compound order's second item ("...and a twelve piece wings," now
+correctly authorized for the PIZZA half by T-044) may still cost the
+model an extra round trip for its OWN half.
+
+**Scope.** Extend `_authorize_item_creation`'s non-pizza branch with the
+same `oe.non_pizza_full_name_match` check T-044 built for the pizza-intent
+clause resolver — a literal, exact, menu-sourced name match, not a new
+alias table.
+
+**Acceptance.** A direct add_item for any `NON_PIZZA` key whose literal
+name is present in the utterance authorizes without a prior search;
+adversarial cases (fabricated/partial names) still refuse.
+
+---
+
 **T-043 audit is DONE (2026-09-22)** — full ground-truth audit after a
 repository-write incident mid-T-041's live gate. Found: (1) the rewrite
 was strongly suspected as Codex's own crash-restart-and-queue-replay loop
@@ -21,44 +140,39 @@ and filed as **T-044** below. `docs/STATUS.md`/`docs/EVALS.md`/ADR-017
 corrected in place. **Owed, not done:** confirming Codex isn't pointed at
 this repo before the next live N=3 run is trustworthy.
 
-**T-044 · `_has_pizza_intent` wrongly refuses compound/conversational
-pizza orders on BOTH interpreters (found by the T-043 audit)** —
-**Priority:** 1 (order-correctness, not substitution-safety — never adds
-a wrong item, but wrongly refuses a right one for the single most common
-order shape) · **Status:** Not started. `_has_pizza_intent` requires the
-ENTIRE utterance to be fully explained as pizza shorthand — real,
-verified failures: `_has_pizza_intent("small cheese and a can of soda")`
-→ `False` (residual "soda"); `"medium cheese, I'll pick it up"` → `False`
-(residual "'ll pick it up"); `"gimme a lg pep"` → `False` (residual
-"gimme pep"); `"two mediums, plain"` → `False` (residual "mediums plain",
-plural SIZE word gap T-041 didn't cover — only fixed plural "pizzas");
-`"large cheese and a twelve piece wings"` → `False` (residual "twelve
-piece wings" — a legitimate non-pizza item mentioned alongside a pizza
-order isn't consumable by the pizza-shorthand grammar at all). Confirmed
-on `RuleBasedInterpreter` directly too, not just the LLM path's evidence
-check — same utterances produce no pizza, no cart, confusing `search_menu`
-misses instead. This is the primary, verified cause of 11 T-032-passing
-corpus cases (`ADV-001`, `CORRECT-003/004/006`, `GOURMET-013`, `MOD-035`,
-`MULTI-001/005`, `NEG-005`, `SLANG-001/003`) now failing 0/3 at T-041 —
-full per-case trace comparison: `docs/AUDIT_T043.md` PART 5. **Scope:**
-redesign `_has_pizza_intent`/`_pizza_shorthand_residual` to require
-POSITIVE pizza evidence PRESENT somewhere in the utterance rather than
-the WHOLE utterance being fully explained — likely needs the residual
-check to also consume real non-pizza item mentions (treat "a pizza AND
-X" as two separate, independently-evidenced intents, not one utterance
-that must explain itself entirely as pizza) plus a small set of ordinary
-conversational fillers ("I'll", "pick it up", "gimme") and plural SIZE
-words ("mediums", "larges"). **Do not weaken the actual substitution
-guard while fixing this** — the fix is about recognizing MORE real
-evidence, never about accepting less. Add a regression case per fixed
-utterance shape (the 5 above, minimum) plus the 11 named corpus cases as
-end-to-end proof. Re-run the N=3 live gate afterward (blocked until
-Codex-repo-safety is confirmed, see T-043's own carried-forward item
-above) and confirm the historical-overlap score recovers meaningfully
-without reintroducing any authorization bypass (0 silent substitutions
-stays 0). Also roll in `_new_pizza_half_a_half_b`'s unshared gate (T-043's
-"THE AUTHORIZATION QUESTION" finding) while touching this code — either
-route it through the same shared predicate or document precisely why not.
+**T-044 is DONE (2026-09-22)** — `_has_pizza_intent` required the ENTIRE
+utterance to be pizza-shorthand; replaced with two conditions (positive
+evidence AND no unresolved product-bearing word left over, checked per
+clause split on `" and "` only) that deliberately avoid the trap the task
+warned about ("positive evidence alone" would reopen the original P0 —
+every T-038 row contains a real topping word). No hand-maintained noun
+list anywhere — resolution is menu-sourced (`oe.non_pizza_alias_hits`/
+`oe.non_pizza_full_name_match`), and an unresolved word blocks whether
+it's a known non-pizza noun or a total unknown, so growing the menu can
+only get MORE permissive, never open a hole. Brought the sixth `add_item`
+call site (`_new_pizza_half_a_half_b`, T-043's named unshared exception)
+under real evidence: `a`/`b` must both be real toppings AND `_has_pizza_
+intent` must hold. Gave gourmet-number pizzas a direct-evidence path for
+the first time (`_pizza_creation_authorized`) — previously required a
+prior `search_menu` round trip even when the utterance plainly said
+"number ten." Two offline regressions found and fixed before the ratchet
+was raised (a bare gourmet number with no "half" phrasing briefly looked
+pizza-shaped; comma-based clause splitting let a bare size fragment count
+as its own evidence); two more found only by the live gate (case-
+sensitivity in the gourmet branch; `_size_supported_by_utterance` could
+only ever agree with ONE size word per utterance, breaking genuine
+two-different-sizes multi-item orders). Live N=3: overlap/73 recovered to
+53.33 (was T-041's 47.0, essentially matching T-032's 54.33), 0/0/0
+substitutions, 7 of the 11 named regressed cases now pass 3/3, the other
+4 confirmed to have the pizza itself created correctly every run (their
+remaining failures are separate, already-filed-or-newly-filed defects —
+see T-045/T-046/T-047 below and T-035's re-confirmation). Full mechanism,
+every regression found and fixed, and the live-gate data:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-044 amendment;
+`docs/STATUS.md`/`docs/EVALS.md`'s T-044 entries;
+`tests/test_t044_pizza_intent.py` (34 tests). `validate` 91/91 unchanged,
+rule-based ratchet 59/91 (was 58, +1 genuine flip), pricing parity 50/50
+unchanged, full suite 613/2/2 (was 583/2/2, zero regressions).
 
 **T-041 is DONE (2026-09-18)** — the mutation-boundary guard's evidence
 check had grown a SECOND retrieval/matching system, independently of
@@ -372,6 +486,13 @@ N=3-per-case before deciding the fix shape.
 
 **Acceptance.** Regression test reproducing the exact mechanism; N=3 proof
 the fix (whatever form it takes) actually changes it.
+
+**Re-confirmed 2026-09-22 (T-044's live N=3 gate, all 3 runs, identical
+mechanism):** `NEG-005` still fails this exact way — pizza + pepperoni
+created correctly, then "make the pepperoni light" adds a SECOND, LITE
+pepperoni line instead of replacing the NORMAL one. Not touched by T-044
+(a different mechanism — intensity-change semantics, not item-creation
+authorization). Still Priority 2, still not started.
 
 ---
 

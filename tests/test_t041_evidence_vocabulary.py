@@ -123,13 +123,30 @@ def test_authorizes_triple_intensity_pizza_order():
     assert reason == AUTH_DIRECT_UTTERANCE_EVIDENCE
 
 
-def test_authorizes_gourmet_spelled_cardinal_via_unique_search_hit():
+def test_authorizes_gourmet_spelled_cardinal_via_direct_evidence():
+    # T-044 amendment to ADR-017: before this task, a gourmet-number
+    # `add_item` had NO direct-evidence path at all — `_authorize_item_
+    # creation` skipped it whenever `gourmet_number` was set, so even an
+    # utterance that plainly says "number ten" required a PRIOR search_menu
+    # hit this same turn (real gap: found live, T-043/AUDIT_T043.md,
+    # CORRECT-004/GOURMET-013). The search hit below is now redundant —
+    # direct evidence authorizes the call on its own — kept in the fixture
+    # only to prove its presence doesn't change the outcome.
     hit = {"kind": "gourmet", "number": 10, "name": "Hawaiian",
           "_ambiguous": False, "_search_query": "number 10"}
     reason = _authorize_item_creation(
         "PIZZA", "MEDIUM", 10, None,
         "medium number ten, extra pepperoni just on one half", [hit], [])
-    assert reason == AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT
+    assert reason == AUTH_DIRECT_UTTERANCE_EVIDENCE
+
+
+def test_authorizes_gourmet_number_with_no_prior_search_at_all():
+    # T-044: the exact real-world shape the old gap blocked — a customer
+    # ordering a numbered specialty directly, with no search_menu round
+    # trip this turn at all.
+    reason = _authorize_item_creation(
+        "PIZZA", "MEDIUM", 10, None, "medium number ten", [], [])
+    assert reason == AUTH_DIRECT_UTTERANCE_EVIDENCE
 
 
 def test_authorizes_spelled_wing_quantity_via_pending_candidate():

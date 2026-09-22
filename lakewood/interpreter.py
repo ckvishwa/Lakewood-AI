@@ -101,6 +101,17 @@ _SIZE_VOCAB = sorted(
     {s.lower() for s in SIZES} | set(oe.SIZE_ALIASES.keys()),
     key=len, reverse=True,
 )
+# T-044: a named specialty's own words ("hawaiian", "bbq chicken") are real
+# pizza vocabulary, sourced from the menu (`GOURMET_ROUND`) same as toppings/
+# sizes — consumed by the pizza-intent residual so "half number 10 hawaiian,
+# half number 8 bbq chicken" doesn't leave "hawaiian"/"bbq chicken" looking
+# like an unexplained, possibly-different product. This only feeds the
+# INTENT gate (is this a pizza request at all); which specific specialty
+# gets added is still decided solely by `gourmet_number`, never by this text.
+_GOURMET_NAME_VOCAB = sorted(
+    {name.lower() for name in GOURMET_ROUND.values()},
+    key=len, reverse=True,
+)
 # Bare "cheese" is a real alias for MOZZARELLA (a customer can ask to "add
 # cheese"), but "large cheese [pizza]" means the base item, not an extra
 # topping — CHEESE PIZZA is already the item add_item creates. Excluded from
@@ -133,9 +144,10 @@ _NEW_PIZZA_TOPPING_VOCAB = [p for p in _TOPPING_VOCAB if p != "cheese"]
 # menu-relevant, unlike a word this list must NOT include (any real topping,
 # size, or item name).
 _PIZZA_SHORTHAND_FILLER_RE = re.compile(
-    r"\b(a|an|the|and|with|please|i'd|id|like|get|want|order|of|only|"
-    r"just|some|me|can|i|for|on|that|this|side|other|actually|make|really|"
-    r"add|to|too)\b",
+    r"\b(a|an|the|and|with|please|i'd|id|i'll|ill|like|get|want|order|of|"
+    r"only|just|some|me|can|i|for|on|that|this|side|other|actually|make|"
+    r"really|add|to|too|gimme|pick|up|it|plain|regular|"
+    r"yeah|yep|uh|um|lemme|do|thanks|thank|you|pickup)\b",
     re.I)
 _QUANTITY_WORD_RE = re.compile(
     r"\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b", re.I)
@@ -174,12 +186,14 @@ def _pizza_shorthand_residual(t: str) -> str:
     residual = t
     for pattern in (_HALF_A_HALF_B_RE, _HH_BY_NUMBER_RE, _ONE_HALF_RE,
                     _OTHER_HALF_RE, _BARE_HALF_RE, _NEGATION_RE, _LITE_RE,
-                    _INTENSITY_WORD_RE, _QUANTITY_WORD_RE,
+                    _INTENSITY_WORD_RE, _QUANTITY_WORD_RE, _PIZZA_WORD_RE,
                     _PIZZA_SHORTHAND_FILLER_RE):
         residual = pattern.sub(" ", residual)
     for phrase in _TOPPING_VOCAB:  # includes bare "cheese"; longest-first
         residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
-    for phrase in _SIZE_VOCAB:
+    for phrase in _SIZE_VOCAB:  # T-044: plural-tolerant, see _find_size
+        residual = re.sub(rf"\b{re.escape(phrase)}s?\b", " ", residual)
+    for phrase in _GOURMET_NAME_VOCAB:  # "hawaiian", "bbq chicken", ...
         residual = re.sub(rf"\b{re.escape(phrase)}\b", " ", residual)
     # Clause punctuation (commas from "pepperoni, no onions") is not itself
     # a product word — strip it before judging whether anything meaningful
@@ -188,22 +202,186 @@ def _pizza_shorthand_residual(t: str) -> str:
     return re.sub(r"\s+", " ", residual).strip()
 
 
+# T-044: split ONLY on " and " — deliberately NOT comma/period the way
+# `_new_pizza`'s own topping loop splits (that loop is scoping HALF phrasing
+# within one already-authorized pizza, a different job). A comma is
+# routinely just a spoken pause inside ONE item's own description ("a
+# garden salad, medium, with grilled chicken" — three comma-separated
+# fragments of ONE order, not three items); treating every comma as an item
+# boundary let a bare size fragment ("medium") count as its OWN clean pizza
+# clause and made "garden salad" look like a separate, fully-resolved item
+# standing next to it — reopening the exact ADR-017 substitution shape
+# (NONPIZZA-003, found by the offline ratchet regressing before this was
+# narrowed, not guessed). "and" is the one word customers actually use to
+# join two distinct orders in one breath ("a large cheese AND a twelve
+# piece wings") — that's the compound shape T-044 exists to unblock.
+_CLAUSE_SPLIT_RE = re.compile(r" and ", re.I)
+
+
+def _clauses(t: str) -> list[str]:
+    return [c.strip() for c in _CLAUSE_SPLIT_RE.split(t) if c.strip()]
+
+
+def _filler_only_strip(t: str) -> str:
+    """Like `_pizza_shorthand_residual` but strips ONLY ordinary connective
+    filler (never a size/topping/item word) — used to tell a clause that's
+    pure conversational filler ("I'll pick it up") from one that has real,
+    unaccounted-for content."""
+    t = _PIZZA_SHORTHAND_FILLER_RE.sub(" ", t)
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _clause_resolves_to_separate_item(clause: str) -> bool:
+    """T-044: does this clause, taken on its own, completely and
+    unambiguously name a real, different menu item — the case where a pizza
+    order and a second, separate order share one utterance ("large cheese
+    and a twelve piece wings")? Two menu-sourced checks, never a hand-
+    maintained noun list: `oe.non_pizza_alias_hits` (the same spoken-form
+    alias table `search_menu` uses) and `oe.non_pizza_full_name_match` (the
+    clause's own words, filler/quantity stripped, exactly cover one real
+    item's identifying words — no partial or extra-word match, so "chicken
+    caesar wrap" is NOT a match for WRAP: "chicken"/"caesar" are left
+    unexplained). A PARTIAL or ambiguous mention is deliberately NOT treated
+    as resolved here — it still blocks pizza creation, the same as today.
+    """
+    if oe.non_pizza_alias_hits(clause):
+        return True
+    stripped = _QUANTITY_WORD_RE.sub(" ", _filler_only_strip(clause))
+    stripped = re.sub(r"\s+", " ", stripped).strip()
+    return oe.non_pizza_full_name_match(stripped)
+
+
+def _no_unresolved_product_words(text: str) -> bool:
+    """T-044: the SECOND of the two conditions pizza creation requires —
+    every clause of the utterance is either fully pizza-shorthand (nothing
+    left over), pure filler, or a fully-named separate real item. A clause
+    that's none of those — a known non-pizza noun ("salad"), an unknown word
+    ("lobster thing"), or a partially-named one ("chicken caesar wrap") —
+    blocks pizza creation. Deliberately does NOT distinguish "known menu
+    noun" from "unknown word": both are unresolved, both block, so growing
+    the menu can only ever make this MORE permissive (a new real item's
+    words become resolvable), never open a silent hole for a word nobody
+    taught the system yet.
+    """
+    for clause in _clauses(text):
+        if _pizza_shorthand_residual(clause) == "":
+            continue
+        if _clause_resolves_to_separate_item(clause):
+            continue
+        return False
+    return True
+
+
+def _clause_has_clean_pizza_content(text: str) -> bool:
+    """T-044: the FIRST condition — at least one clause is fully explained
+    as pizza shorthand (a real size/topping/modifier vocabulary, nothing
+    left over) AND wasn't just pure filler to begin with ("I'll pick it up"
+    must not itself count as pizza evidence just because it strips to
+    nothing) AND is more than a BARE size word alone. A size alone is
+    deliberately too weak ("'small' is also a real GARDEN SALAD SM size" —
+    the same reasoning `_new_pizza`'s own original gate already relied on,
+    now enforced per-clause): "actually make it large" (a size-only
+    correction, no topping/pizza word anywhere) must not read as a request
+    for a NEW pizza just because "make"/"it"/"actually" are filler — found
+    by the offline ratchet regressing CORRECT-002 before this was added,
+    not guessed."""
+    for clause in _clauses(text):
+        pre = _filler_only_strip(clause)
+        if pre == "":
+            continue  # pure filler clause — no evidence either way
+        if _pizza_shorthand_residual(clause) != "":
+            continue
+        beyond_size = pre
+        for phrase in _SIZE_VOCAB:
+            beyond_size = re.sub(rf"\b{re.escape(phrase)}s?\b", " ", beyond_size)
+        beyond_size = re.sub(r"[^\w\s]", " ", beyond_size)
+        if re.sub(r"\s+", " ", beyond_size).strip() == "":
+            continue  # nothing but a bare size word — not enough on its own
+        return True
+    return False
+
+
+_GOURMET_NUMBER_REF_TEMPLATE = r"(?:#\s*|\bnumber\s*|\bnum\s*|\bno\.?\s*)%d\b"
+
+
+def _gourmet_number_referenced(text: str, number: int) -> bool:
+    """T-044: direct evidence for ONE specific numbered specialty — the
+    customer said that number ("#10"/"number 10", already normalized to
+    digits by `oe.normalize_menu_text`) or the specialty's own name
+    ("Hawaiian"). Never "some number was said somewhere" — the number must
+    match the one actually being authorized."""
+    if re.search(_GOURMET_NUMBER_REF_TEMPLATE % number, text, re.I):
+        return True
+    return _words_present(GOURMET_ROUND.get(number, ""), text)
+
+
+def _pizza_creation_authorized(text: str, size, gourmet_number, second_gourmet_number) -> bool:
+    """T-044: the one pizza-creation evidence check every add_item call site
+    that creates a pizza line goes through — plain cheese/topping shorthand
+    (delegates to `_has_pizza_intent`), a single numbered specialty, or a
+    half-and-half by two numbers. Same two conditions either way: positive
+    evidence of THIS pizza, and no unresolved product-bearing word left over
+    anywhere else in the utterance. See ADR-017's T-044 amendment.
+
+    "number"/"num"/"#" are deliberately NOT general filler (unlike "gimme"/
+    "pick"/"up") — they're only ever consumed here, for the SPECIFIC
+    number(s) this call is actually authorizing, once `_gourmet_number_
+    referenced` has confirmed the customer really said that number. Making
+    "number" filler everywhere broke AVAIL-002 ("small number five", no
+    "half" phrasing — `RuleBasedInterpreter` has no bare-single-gourmet-
+    number branch, so a permissive "number" would make `_has_pizza_intent`
+    true and silently create a CHEESE PIZZA instead of routing to
+    search_menu): found by the offline ratchet regressing 58->55, not
+    guessed — see `tests/test_evals.py`'s baseline comment.
+
+    Lowercased once, here, before anything else: `_has_pizza_intent`
+    already does this internally, but the gourmet branch below calls the
+    same residual/clause machinery DIRECTLY, which (like
+    `_pizza_shorthand_residual` itself) assumes pre-lowercased input and
+    has no `re.I` of its own — found live (GOURMET-013's own N=1 live-gate
+    trace: "Hawaiian"/"BBQ chicken", real sentence-case from the corpus
+    text, never matched the lowercase `_GOURMET_NAME_VOCAB`, so the
+    otherwise-correct clause stayed looking "unresolved" and the pizza was
+    refused), not guessed.
+    """
+    text = text.lower()
+    if gourmet_number is not None:
+        if not _gourmet_number_referenced(text, gourmet_number):
+            return False
+        numbers = [gourmet_number]
+        if second_gourmet_number is not None:
+            if not _gourmet_number_referenced(text, second_gourmet_number):
+                return False
+            numbers.append(second_gourmet_number)
+        stripped = text
+        for n in numbers:
+            stripped = re.sub(_GOURMET_NUMBER_REF_TEMPLATE % n, " ", stripped, flags=re.I)
+        return _no_unresolved_product_words(stripped)
+    return _has_pizza_intent(text)
+
+
 def _has_pizza_intent(text: str) -> bool:
-    """T-039A invariant: a request may create a pizza only when the
-    utterance provides positive, deterministic evidence the customer
-    intended a pizza — either the explicit word "pizza"/a recognized
-    gourmet pizza, or a fully-explained pizza-shorthand utterance (every
-    meaningful token is a size/topping/modifier/quantity/filler, nothing
-    left unaccounted for). Shared by BOTH interpreters' mutation boundary:
+    """T-039A invariant, amended T-044: a request may create a (plain/
+    topped) pizza only when the utterance provides positive, deterministic
+    evidence the customer intended a pizza — the explicit word "pizza"/
+    "pie" (unconditional: an explicit pizza word is never overridden by
+    something else also being in the utterance), OR at least one clause
+    that's fully explained as pizza shorthand AND no clause anywhere in the
+    utterance contains an unresolved product-bearing word (T-044 — a
+    genuinely separate, fully-named item, e.g. "and a twelve piece wings",
+    does not block; an unresolved or partial one, e.g. "and a chicken
+    caesar wrap", does). Shared by BOTH interpreters' mutation boundary:
     `RuleBasedInterpreter` gates `_new_pizza`/the bare-topping graft with it
     directly; `LLMInterpreter` gates any model `add_item` call that would
-    create a pizza with the SAME function (see `_authorize_item_creation`
-    below) — one predicate, not two independently-drifting checks.
+    create a pizza with the SAME function, via `_pizza_creation_authorized`
+    (see `_authorize_item_creation` below) — one predicate, not two
+    independently-drifting checks.
     """
     t = text.strip().lower()
     if _PIZZA_WORD_RE.search(t):
         return True
-    return _pizza_shorthand_residual(t) == ""
+    return _clause_has_clean_pizza_content(t) and _no_unresolved_product_words(t)
 
 
 # T-039B: stable, distinguishable authorization outcomes for `add_item` —
@@ -222,14 +400,32 @@ _AUTHORIZED_REASONS = {
 }
 
 
+def _size_word_matches(text: str, canonical_size: str) -> bool:
+    """T-044: does ANY spoken alias for THIS canonical size appear in
+    `text` — membership, not "is it the one `_find_size` would pick first."
+    `_find_size` returns a single best guess (longest-vocab-first) for "the"
+    size of a SINGLE item; a multi-item utterance can legitimately name TWO
+    different sizes for two different lines ("one small cheese and one
+    medium cheese pizza") and the SECOND size would never win that
+    length-ordered race, wrongly failing size support for a real, spoken
+    size. Still refuses a genuinely fabricated size no alias of which
+    appears anywhere in the utterance (a model can't manufacture "extra
+    large" out of "large pepperoni"). Found live (MULTI-001's own N=1
+    live-gate trace: the SMALL line was refused with UNSUPPORTED_ITEM_
+    SUBSTITUTION because "medium" — the longer vocab entry — matched
+    first), not guessed."""
+    text = text.lower()
+    return any(canon == canonical_size and re.search(rf"\b{re.escape(phrase)}s?\b", text)
+               for phrase, canon in oe.SIZE_ALIASES.items())
+
+
 def _size_supported_by_utterance(text: str, proposed_size: str | None) -> bool:
     """A model may not manufacture a size attribute the customer never gave."""
     if not proposed_size:
         return True  # the domain tool will return SIZE_REQUIRED when applicable
     proposed = oe.SIZE_ALIASES.get(str(proposed_size).strip().lower(),
                                    str(proposed_size).strip().upper())
-    spoken = _find_vocab(text.lower(), _SIZE_VOCAB)
-    return bool(spoken and oe.SIZE_ALIASES.get(spoken, spoken.upper()) == proposed)
+    return _size_word_matches(text, proposed)
 
 
 def _words_present(phrase: str, text: str) -> bool:
@@ -281,8 +477,7 @@ def _item_hit_supported_by_utterance(hit: dict, text: str) -> bool:
         return False
     if encoded_size is None:
         return True
-    spoken = _find_vocab(text.lower(), _SIZE_VOCAB)
-    return bool(spoken and oe.SIZE_ALIASES.get(spoken, spoken.upper()) == encoded_size)
+    return _size_word_matches(text, encoded_size)
 
 
 def _matching_search_hit(item_key: str, gourmet_number, search_hits: list[dict]):
@@ -329,7 +524,7 @@ def _select_pending_candidate(text: str, pending_candidates: list[dict]):
     bare size alone is not evidence for which family it belongs to.
     """
     t = text.strip().lower()
-    utterance_size = _find_vocab(t, _SIZE_VOCAB)
+    utterance_size = _find_size(t)
     utterance_size_canon = oe.SIZE_ALIASES.get(utterance_size) if utterance_size else None
 
     parsed = []  # (type_words, cand_size, hit)
@@ -466,8 +661,7 @@ def _authorize_item_creation(item_key: str, size, gourmet_number, second_gourmet
         or gourmet_number is not None or second_gourmet_number is not None
 
     if creates_pizza:
-        if (gourmet_number is None and second_gourmet_number is None
-                and _has_pizza_intent(text)
+        if (_pizza_creation_authorized(text, size, gourmet_number, second_gourmet_number)
                 and _size_supported_by_utterance(text, size)):
             return AUTH_DIRECT_UTTERANCE_EVIDENCE
     else:
@@ -559,6 +753,22 @@ def _find_vocab(text: str, vocab: list[str]) -> Optional[str]:
     return None
 
 
+def _find_size(text: str) -> Optional[str]:
+    """Plural-tolerant size lookup — "two mediums" must resolve to MEDIUM
+    the same way "medium" alone does. Sizes are the one vocabulary where a
+    customer ordering for a group routinely pluralizes the word itself;
+    `\\bmedium\\b` never matches inside "mediums" (no boundary before the
+    trailing "s"), the same gap T-041 already found and fixed for
+    "pizza"/"pizzas". T-044: kept separate from `_find_vocab` rather than
+    making it plural-tolerant everywhere, since toppings mostly encode their
+    plural in the canonical alias itself ("onion" -> ONIONS) and widening
+    match behavior there wasn't needed by any evidenced case."""
+    for phrase in _SIZE_VOCAB:
+        if re.search(rf"\b{re.escape(phrase)}s?\b", text):
+            return phrase
+    return None
+
+
 def _find_drink(text: str) -> Optional[str]:
     hits = oe.non_pizza_alias_hits(text)
     return hits[0][1] if hits else None
@@ -631,10 +841,10 @@ class RuleBasedInterpreter:
                 chat, t, int(m.group("n1")), int(m.group("n2")))
 
         # 6. Classic "half A half B" phrasing at pizza creation.
-        size = _find_vocab(t, _SIZE_VOCAB)
+        size = _find_size(t)
         m = _HALF_A_HALF_B_RE.search(t)
         if m and size:
-            return self._new_pizza_half_a_half_b(chat, size, m.group("a"), m.group("b"))
+            return self._new_pizza_half_a_half_b(chat, size, t, m.group("a"), m.group("b"))
 
         # 7. Generic drink mention.
         drink_key = _find_drink(t)
@@ -723,19 +933,38 @@ class RuleBasedInterpreter:
 
     def _half_and_half_by_number(self, chat: ChatState, t: str,
                                  n1: int, n2: int) -> Interpretation:
-        size = _find_vocab(t, _SIZE_VOCAB)
+        size = _find_size(t)
         if not size:
             chat.pending_clarification = [{"kind": "size_needed", "n1": n1, "n2": n2}]
             return Interpretation(say="What size would you like?")
+        # T-044: bring this call site under the same evidence check as the
+        # other five (docs/AUDIT_T043.md's authorization audit) — defense in
+        # depth, not a response to an observed defect here (both numbers
+        # being literally adjacent to "half" is already strong evidence).
+        if not _pizza_creation_authorized(t, size, n1, n2):
+            return Interpretation(calls=[
+                ToolCall("search_menu", {"query": _clean_query(t)})])
         return Interpretation(calls=[ToolCall("add_item", {
             "item": "PIZZA", "size": size,
             "gourmet_number": n1, "second_gourmet_number": n2,
         })])
 
-    def _new_pizza_half_a_half_b(self, chat: ChatState, size: str,
+    def _new_pizza_half_a_half_b(self, chat: ChatState, size: str, t: str,
                                  a: str, b: str) -> Interpretation:
         a_name = oe.ALIASES.get(a.strip(), a.strip().upper())
         b_name = oe.ALIASES.get(b.strip(), b.strip().upper())
+        # T-044/AUDIT_T043: this was the one call site NOT sharing the
+        # authorization predicate the other five do — `_HALF_A_HALF_B_RE`
+        # matching alone was treated as sufficient evidence, with no check
+        # that `a`/`b` actually name real toppings. `_pizza_shorthand_
+        # residual` swallows the whole "half A half B" span in one match
+        # (needed so a legitimate order's residual comes out empty), which
+        # means it can't itself catch a fabricated A/B — so that check has
+        # to happen here, explicitly, before any tool call is proposed.
+        if (a_name not in oe.ALL_TOPPINGS or b_name not in oe.ALL_TOPPINGS
+                or not _has_pizza_intent(t)):
+            return Interpretation(calls=[
+                ToolCall("search_menu", {"query": _clean_query(t)})])
         return Interpretation(calls=[
             ToolCall("add_item", {"item": "CHEESE PIZZA", "size": size}),
             ToolCall("add_modifier", {"line_id": "$LAST", "modifier": a_name,
@@ -845,7 +1074,7 @@ class RuleBasedInterpreter:
         cands = chat.pending_clarification
         chat.pending_clarification = None
         if cands and cands[0].get("kind") == "size_needed":
-            size = _find_vocab(t, _SIZE_VOCAB)
+            size = _find_size(t)
             if not size:
                 chat.pending_clarification = cands
                 return None

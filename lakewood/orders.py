@@ -108,6 +108,7 @@ ALIASES = {
     "grilled chicken": "CHICKEN", "buffalo chicken": "CHICKEN",
     "meatball": "MEATBALLS", "tomato": "TOMATOES", "anchovy": "ANCHOVIES",
     "parmesan": "PARMESAN CHEESE", "parm": "PARMESAN CHEESE",
+    "pep": "PEPPERONI",  # T-044: real counter/phone slang ("a lg pep")
     "ranch": "SIDE RANCH", "blue cheese": "SIDE BLUE CHEESE",
     "marinara": "RED SAUCE", "tomato sauce": "RED SAUCE",
     "white": "WHITE SAUCE", "red": "RED SAUCE",
@@ -171,6 +172,52 @@ def non_pizza_alias_hits(raw_q: str) -> list[tuple[str, str]]:
     specific = {c for a, c in matched if a not in GENERIC_DRINK_ALIASES}
     return [(a, c) for a, c in matched
             if not (a in GENERIC_DRINK_ALIASES and specific and c not in specific)]
+
+# T-044: structural, POS-label-only tokens inside a NON_PIZZA key (size
+# suffixes, the "PC" in "6PC WINGS", generic modifier-row nouns like "ITEM"
+# in "CALZONE ITEM") — never a word a customer would actually say to name
+# the item, so they're dropped when deriving what a real mention of that
+# item looks like. This is NOT a denylist of customer-facing product nouns
+# (the thing ADR-017/T-039A already ruled out) — it only strips SKU-table
+# formatting artifacts before the real identifying words are computed below.
+_NON_PRODUCT_NAME_NOISE = {"sm", "lg", "pc", "extra", "item"}
+
+
+def _menu_item_identifying_words(name: str) -> frozenset[str]:
+    return frozenset(w for w in re.findall(r"[a-z]+", name.lower())
+                      if w not in _NON_PRODUCT_NAME_NOISE)
+
+
+# T-044: every real NON_PIZZA item's identifying words, computed once from
+# the menu itself (`data/menu.json` via `pricing.NON_PIZZA`) — never a hand-
+# maintained noun list. `interpreter.py`'s pizza-intent gate uses this to
+# tell "a genuinely different, fully-named menu item is also in this
+# utterance" (must not block the pizza) apart from "an unresolved word is
+# here" (must). See `non_pizza_full_name_match` below and ADR-017's T-044
+# amendment.
+NON_PIZZA_IDENTIFYING_WORDS: dict[str, frozenset[str]] = {
+    name: _menu_item_identifying_words(name) for name in NON_PIZZA
+}
+
+
+def non_pizza_full_name_match(text: str) -> bool:
+    """True when EVERY word in `text` (letters only, trivial articles
+    dropped) is exactly the identifying-word set of some one real NON_PIZZA
+    item — a complete, unambiguous mention of that item with nothing left
+    unexplained. A PARTIAL match ("chicken caesar wrap" against WRAP's
+    {"wrap"} — "chicken"/"caesar" left over) is deliberately NOT a match:
+    this function exists to let a genuinely separate, fully-named item
+    stand alongside a pizza in the same utterance without blocking pizza
+    creation, never to wave through an ambiguous or partially-explained
+    product mention. Caller is expected to have already stripped filler/
+    quantity words from `text` (see `interpreter.py`'s
+    `_clause_resolves_to_separate_item`)."""
+    words = (frozenset(re.findall(r"[a-z]+", text.lower()))
+             - {"a", "an", "the"} - _NON_PRODUCT_NAME_NOISE)
+    if not words:
+        return False
+    return any(words == ids for ids in NON_PIZZA_IDENTIFYING_WORDS.values() if ids)
+
 
 # T-020: words that carry no menu-identifying content but routinely appear
 # around a real item/topping name in a natural request and previously broke
