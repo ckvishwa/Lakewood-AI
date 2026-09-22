@@ -139,8 +139,13 @@ CURRENT menu before anything is quoted (a `cart_hash` match proves contents
 didn't change, never that today's price is the same one quoted before).
 **CURRENT (T-038 Phase 1):** `chat.py::PersistentChat` wires this into the
 text path, with one executor shared by rule-based and staged LLM tools;
-confirmation uses durable persistence. Voice, TTS, and telephony remain
-PLANNED.
+confirmation uses durable persistence. **CURRENT (T-038 Phase 2 + T-050),
+local dev loop only:** `lakewood/voice.py::LocalVoiceLoop` drives the same
+`PersistentChat.run_turn` over local STT (faster-whisper/Parakeet) and TTS
+(Windows SAPI), with Silero-VAD endpointing (ADR-018) replacing a fixed
+capture window and sentence-pipelined TTS playback. Real production
+telephony (a phone line reaching this loop) remains PLANNED — ADR-004 is
+still open on the vendor.
 
 ## State machine
 

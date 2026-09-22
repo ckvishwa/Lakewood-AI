@@ -2,32 +2,73 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
-## T-050 · VAD/endpointing to replace the fixed 5-second voice capture window — RECOMMENDED NEXT
+## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection — RECOMMENDED NEXT
 
-**Priority:** 5 · **Status:** Not started (filed 2026-09-22, from T-049)
+**Priority:** 0 · **Status:** Not started (filed 2026-09-08, still open)
 
-**Found in the T-038 Phase 2 real-hardware run** (see STATUS.md): median
-end-to-end turn latency was 5.899 s, of which the fixed 5-second microphone
-capture window (`SoundDeviceMicrophone.capture`, `lakewood/voice.py`) is
-~5.2 s — the dominant cost by a wide margin. Real processing after capture
-was ~0.688 s median. Replacing the fixed window with voice-activity
-detection or push-to-stop endpointing removes ~4+ seconds from every turn
-without touching STT/TTS/app latency at all — the single highest-leverage
-remaining latency fix, and the difference between a demo that impresses and
-one that drags.
+See the full original entry further below (unchanged). **Note added
+2026-09-22 (T-044):** the "silently ordering the wrong item" framing may be
+stale — T-044's own regression test (`AVAIL-002`) confirms a bare gourmet-
+number utterance with no size ("small number five") now correctly falls
+through to `search_menu` (safe), not a silent `CHEESE PIZZA`. The real
+remaining gap is `RuleBasedInterpreter` has NO parsing branch for a single
+bare gourmet number at all — it can order a `CHEESE PIZZA`, a half-and-half
+by two numbers, or resolve a number from a PENDING clarification, but never
+"medium number ten" cold. P0 in the existing backlog, smallest concrete item
+left, now that T-049 (printer, hardware-blocked) and T-050 (voice
+latency) are both done/parked. Voice/telephony work is explicitly P5 in
+CLAUDE.md's priority order — this order-correctness gap outranks it.
 
-**Scope.** `SoundDeviceMicrophone`/`LocalVoiceLoop` in `lakewood/voice.py`
-only — no interpreter, prompt, or domain changes. Silence-based endpointing
-(a VAD library or a simple energy-threshold cutoff) is the pragmatic MVP
-choice per CLAUDE.md's "buy, don't build" guidance for non-moat concerns;
-push-to-stop (a key/button) is the zero-dependency fallback if a VAD
-dependency isn't wanted yet.
+## T-050 · VAD endpointing + TTS pipelining — **DONE (with honestly-scoped gaps), 2026-09-22**
 
-**Acceptance.** A real turn's capture time is bounded by actual speech end,
-not a fixed timer; median/p95 latency re-measured on real hardware and
-compared against the T-038 Phase 2 baseline above; offline suite stays
-green (this module has no interpreter-facing surface, so no eval re-run is
-expected, but confirm and say so explicitly either way).
+**Priority:** 5 · **Status:** Part 1 (VAD) and Part 3-TTS (sentence
+pipelining) and Part 4 (capture/playback half-duplex) done and tested.
+Part 2 (streaming STT) and Part 3-LLM (streaming LLM) are NOT implemented —
+verified impossible/inapplicable with this codebase's current providers and
+architecture, not silently skipped. Part 5 (measurement) done with real
+numbers and a disclosed methodology caveat (no WSL Parakeet GPU service
+reachable this session — used faster-whisper CPU instead).
+
+See `docs/STATUS.md`'s T-050 entry for the full account, real measured
+numbers, and ADR-018 for the Silero-VAD-over-WebRTC-VAD choice and default
+endpointing parameters. Short version: `lakewood/vad.py` (`Endpointer`) is
+a pure, fully-unit-tested state machine; `lakewood/voice.py` feeds it real
+Silero probabilities (reused from `faster_whisper.vad`'s bundled model —
+zero new dependency); TTS is sentence-pipelined so the first sentence plays
+while later ones synthesize; capture and playback never overlap by
+construction, proven by a real 3-turn confirmation-flow test. 20 new tests
+across `tests/test_vad.py`, `tests/test_voice_tts_pipeline.py`,
+`tests/test_voice_vad_microphone.py`.
+
+## T-051 · Windows SAPI's default speaking rate makes confirmation readbacks slow (real customer-facing wait, not a system-latency problem)
+
+**Priority:** 6 · **Status:** Not started (filed 2026-09-22, found during T-050's Part 5 measurement)
+
+**Found while measuring T-050:** a real 13-word reply measured 6.77 seconds
+of actual audio duration via `WindowsSapiTTSProvider` (`System.Speech
+.Synthesis.SpeechSynthesizer`, default `Rate=0`); a real 3-sentence
+confirmation readback ("That's pickup: LARGE CHEESE PIZZA — pepperoni, no
+onions. Total $19.32. Should I go ahead and place it?") measured over 15
+real seconds to speak. Every latency stage T-050 addressed (capture, STT,
+app, TTS synthesis) could be instant and a customer would still wait 15+
+seconds to hear a 3-sentence confirmation — this is real talk-time, not a
+processing bottleneck, and T-050's sentence-pipelining does not reduce it
+(it only moves WHEN the customer starts hearing audio, not how long the
+full reply takes to finish saying).
+
+**Scope.** `lakewood/tts/windows_sapi.py`'s `SpeechSynthesizer.Rate`
+property (range -10..+10, default 0) — a one-line PowerShell script change,
+no domain/prompt impact. Needs a real-audio sanity check (too fast reads as
+robotic/unclear, not just "faster") before picking a value; report the
+before/after real audio duration for the same sentences measured in T-050's
+STATUS.md entry, not an estimate.
+
+**Acceptance.** Same confirmation readback re-measured with a real audio
+duration meaningfully under today's 15s, still intelligible (owner or a
+real listener confirms, not just "the number went down"); offline suite
+stays green (this module has no test coverage of literal SAPI output
+today, appropriately, since it needs Windows/PowerShell — confirm and state
+that explicitly).
 
 ## T-049 · Printer hardware bring-up + end-to-end dispatch — **PARTIAL, hardware-blocked (2026-09-22)**
 
@@ -58,22 +99,6 @@ tracks dispatch status — a process crash between `finalize_session` and
 dispatch completing means a replayed confirm returns the cached "ok" without
 ever retrying dispatch. Needs a persisted dispatch-status column; out of
 this task's time box.
-
-## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection
-
-**Priority:** 0 · **Status:** Not started (filed 2026-09-08, still open)
-
-See the full original entry further below (unchanged). **Note added
-2026-09-22 (T-044):** the "silently ordering the wrong item" framing may
-be stale — T-044's own regression test (`AVAIL-002`) confirms a bare
-gourmet-number utterance with no size ("small number five") now correctly
-falls through to `search_menu` (safe), not a silent `CHEESE PIZZA`. The
-real remaining gap is `RuleBasedInterpreter` has NO parsing branch for a
-single bare gourmet number at all — it can order a `CHEESE PIZZA`, a
-half-and-half by two numbers, or resolve a number from a PENDING
-clarification, but never "medium number ten" cold. Recommended as the
-next task: small, contained, directly adjacent to T-044's own gourmet-
-number authorization work, P0 in the existing backlog.
 
 ## T-045 · `_size_supported_by_utterance` has no cross-turn context — a same-size correction turn is wrongly refused
 

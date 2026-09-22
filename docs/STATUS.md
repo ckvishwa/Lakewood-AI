@@ -24,6 +24,184 @@ execution.
 
 ## Current phase
 
+**T-050 done (with honestly-scoped gaps), 2026-09-22 (P1): VAD endpointing
+replaces the fixed 5-second capture window; TTS is sentence-pipelined; STT
+and LLM streaming are NOT implemented, for stated reasons, not silently
+skipped.** Preconditions confirmed first: T-049 committed/pushed (`e7be61a`),
+clean tree, HEAD matches origin.
+
+**Part 1 — VAD/endpointing: done.** `lakewood/vad.py` (`Endpointer`/
+`VadConfig`) is a pure state machine, fully unit-tested with synthetic
+probability sequences (`tests/test_vad.py`, 7 cases: clean stop timing,
+mid-sentence-pause survival, noise-blip rejection, silent-customer timeout,
+max-utterance safety cap, timeout-vs-endpoint distinction, no state leakage
+between turns). `lakewood/voice.py::SoundDeviceMicrophone` feeds it real
+Silero VAD probabilities — reused from `faster_whisper.vad`'s already-
+bundled ONNX model (already an optional dependency via ADR-008/faster-
+whisper; zero net-new dependency), not a new `webrtcvad` package. See
+ADR-018 for the full choice/defaults reasoning (`min_silence_ms=700`,
+`no_speech_timeout_seconds=6.0`, `max_utterance_seconds=15.0`, all
+env-tunable). `tests/test_voice_vad_microphone.py` proves clean, labeled
+failure when `sounddevice`/`faster_whisper.vad` are absent (import-blocked
+so results don't depend on this environment's actual installs).
+
+**Part 2 — streaming STT: NOT possible, verified by reading both provider
+adapters.** `lakewood/stt/parakeet_provider.py` is one `POST /transcribe`
+with a full WAV body, one JSON response — no partial/streaming endpoint
+exists on the WSL service side. `lakewood/stt/faster_whisper_provider.py`
+calls `WhisperModel.transcribe()` and consumes `list(segments_iter)` before
+returning — batch, by construction. Neither was modified to fake
+streaming. The real win for this stage is Part 1: transcription now starts
+the instant VAD detects end-of-speech, not after a fixed 5-second wait.
+
+**Part 3 — streaming LLM: NOT implemented, architecturally inapplicable,
+not merely unbuilt.** None of the four `lakewood/llm_provider.py` adapters
+request streaming (`AnthropicProvider` omits `"stream"` entirely — defaults
+false server-side; `OllamaProvider` sends `"stream": False` explicitly;
+neither `OpenAIProvider` nor `ExperientialProvider` request it either) —
+but the deeper reason streaming wasn't added is that it would change
+nothing customer-facing: `chat.py::_reply_for` and every readback builder
+in `orders.py` construct the spoken reply ENTIRELY from a completed,
+validated tool result. `ProviderResponse.text` (the model's own free-text
+output) is never read by `_finish_turn` — there is no raw model prose in
+this system's voice path to stream in the first place. Adding SSE-stream
+plumbing to four providers for zero measurable latency benefit would be
+exactly the "impressive architecture" CLAUDE.md says not to build here;
+this is documented as a deliberate decision (see
+`lakewood/voice.py::LocalVoiceLoop._speak_reply`'s own docstring), not a
+silently skipped requirement.
+
+**Part 3 — streaming TTS: done, the one stage that genuinely streams.**
+`LocalVoiceLoop._speak_reply` splits the reply into sentences and
+synthesizes them in a background thread while the main thread plays
+already-ready sentences in order — sentence N+1's synthesis overlaps
+sentence N's playback. `tests/test_voice_tts_pipeline.py` (8 cases) proves:
+sentence splitting, real overlap (synth(N+1) provably starts before
+play(N) returns, using an instrumented fake with artificial synth delay),
+first-audio arriving at ~one sentence's synthesis time rather than the
+whole reply's, and — directly protecting the "never speak before the
+domain layer produced the reply" invariant — that every synthesized
+sentence is a substring of the already-complete `TurnResult.reply`.
+
+**Part 4 — barge-in-adjacent safety: the simple, safe default: capture and
+playback never overlap.** No turn-taking signal was built (full barge-in
+is explicitly out of scope). `LocalVoiceLoop.turn()` cannot return — and
+therefore the next `input("Press Enter > ")`-gated capture cannot start —
+until `_speak_reply` has finished playing every sentence (its internal
+`worker.join()` plus the blocking `WindowsSapiTTSProvider.play`/`PlaySync`
+call for the last sentence guarantee this). `tests/test_voice_tts_pipeline
+.py::test_capture_never_starts_before_previous_turns_playback_finished`
+runs a real 3-turn sequence (build cart → quote → `begin_confirmation`
+readback) and asserts every capture after the first is immediately
+preceded by a play in the recorded event order — never two captures back
+to back, never a capture racing a still-playing readback. A second test,
+`test_confirmation_readback_audio_never_bleeds_into_next_turns_transcript`,
+proves the NEXT turn's transcript is exactly its own fresh STT result,
+never merged with the readback text — the specific failure mode Part 4
+warned about.
+
+**Part 5 — measurement, real numbers, disclosed methodology.** This
+coding-agent session cannot literally speak into a microphone (same
+constraint class as T-049's printer — see that entry — except a real
+microphone IS present on this machine, confirmed via `Get-PnpDevice`
+(Realtek Microphone Array), unlike the printer). Real audio was used
+instead: this repo's own `lakewood/stt/fixtures/*.wav` — TTS-synthesized
+speech per their own `manifest.json` provenance disclosure, not human
+speech — fed through the REAL, unmodified `LocalVoiceLoop.turn()` code
+path (real `Endpointer`, real Silero model, real `FasterWhisperProvider`
+STT on CPU, real `RuleBasedInterpreter`/`PersistentChat.run_turn`, real
+`WindowsSapiTTSProvider`, real playback), with only the raw audio SOURCE
+substituted (a file played back chunk-by-chunk at real wall-clock pace, in
+place of a live `sd.InputStream`). This is a real plumbing/latency
+measurement, not an STT/order-accuracy claim (same caveat this repo
+already states elsewhere for these exact fixtures).
+
+**Critical caveat on the comparison below: the WSL Parakeet GPU service
+was NOT reachable this session** (`curl http://127.0.0.1:8765/health` timed
+out) — T-038's baseline used Parakeet (STT median 0.320s); this measurement
+had to use `faster-whisper small` on CPU instead (median STT 2.414s here —
+consistent with ADR-016's own earlier CPU benchmark of 2.748s). The STT
+provider swap, not this task's work, accounts for most of the "total"
+number below looking worse than T-038's. The capture-stage comparison
+(same utterance-length class, different capture mechanism) is the clean,
+apples-to-apples Part 1 result; the full-total comparison is NOT
+apples-to-apples and is labeled as such.
+
+Real numbers, 2 turns (`negation_no_onions`, `correction_size` fixtures,
+~3.0-3.9s of real audio each), plus one supplementary real TTS-only
+measurement of a clean confirmation readback (text-driven turns, no
+fixture audio exists for "what's my total?"/"yes place it" — STT/capture
+were not exercised for that part, only the real TTS pipeline was):
+
+```
+OLD (T-038 Phase 2 baseline, Parakeet GPU STT, fixed 5s capture):
+  capture: fixed 5.219s (ALWAYS, regardless of utterance length)
+  stt:     median 0.320s / p95 0.391s   (Parakeet, GPU)
+  total:   median 5.899s / p95 6.235s
+
+NEW (T-050, this session, Silero-VAD capture, faster-whisper CPU STT):
+  capture:              median 3.453s / p95 3.813s   <- real content-dependent, not fixed
+  stt:                  median 2.414s / p95 2.422s   <- faster-whisper CPU, NOT Parakeet (see caveat)
+  app (domain):         median 0.000s / p95 0.000s
+  tts first audio:      median 0.375s / p95 0.375s
+  tts synthesis total:  median 0.547s / p95 0.719s
+  total (system latency, excludes playback talk-time):
+                         median 6.415s / p95 6.594s
+  perceived (speech-end -> first audio):
+                         median 2.789s / p95 2.797s
+  tts playback (real talk-time, NOT a latency number):
+                         median 7.774s / p95 8.657s
+
+Clean, apples-to-apples Part 1 result (capture stage only, same STT/TTS):
+  fixed window:  5.219s always
+  VAD-based:     3.453s median / 3.813s p95  for these ~3.0-3.9s utterances
+  -> ~1.4-1.9s saved on capture alone for utterances this length; the
+     saving grows for shorter utterances (VAD stops near real speech end,
+     not a fixed clock) and shrinks for utterances approaching/exceeding
+     the old 5s window.
+
+Supplementary — confirmation readback, real TTS pipeline, text-driven
+(no STT/capture measured for this part):
+  reply: "That's pickup: LARGE CHEESE PIZZA - pepperoni, no onions.
+          Total $19.32. Should I go ahead and place it?" (3 sentences)
+  tts first audio:     0.375s
+  tts synthesis total: 1.062s   <- first audio at 35% of total synth time
+  playback (talk-time): 15.187s
+```
+
+**Incidental finding, reported at full severity per CLAUDE.md, not fixed
+here (out of T-050's scope — no prompt/TTS-tuning change requested):**
+Windows SAPI's default voice/rate is slow — a real 13-word sentence
+("Got it, large cheese pizza, pepperoni, no onions. Anything else?")
+measured 6.77 seconds of actual audio duration
+(`lakewood.tts.windows_sapi.WindowsSapiTTSProvider`, `SpeechSynthesizer`
+default `Rate=0`). A 3-sentence confirmation readback took over 15 real
+seconds to speak in the measurement above. This is real customer-facing
+talk-time, independent of any system processing latency this task
+addresses — every stage above could be instant and a customer would still
+wait 15+ seconds to hear a 3-sentence confirmation. `SpeechSynthesizer.Rate`
+(range -10..+10, default 0) is the lever; not touched this task.
+
+**Existing invariants confirmed intact, not just assumed:** full offline
+suite still exercises F14 (same-turn confirm rejected) and F16 (mandatory
+readback) unchanged — this task touched no domain/guard code, only
+`lakewood/voice.py` and the new `lakewood/vad.py`. No prompt, tool
+description, or provider surface was touched, so **no live LLM N=3 gate
+was required — stated explicitly, not silently skipped.**
+
+**Gates run, all offline:**
+```
+python -m pytest --no-header -q        → 649 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged from T-044/T-049)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+```
+T-016 offline/no-network gate: confirmed — `psycopg2` still not installed,
+no network call anywhere in the offline suite; the only new optional
+dependency touched (`faster_whisper.vad`) is lazy-imported and never
+reached by any offline test (proven by import-blocking in
+`tests/test_voice_vad_microphone.py`).
+
 **T-049 PARTIAL, 2026-09-22 (P1): dispatch wiring done and offline-verified;
 hardware bring-up HARD-BLOCKED — no path to the real printer from this
 session.** Preconditions confirmed first: T-044 committed and pushed
