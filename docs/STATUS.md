@@ -22,12 +22,27 @@ execution.
 
 ## Current phase
 
-**T-041 done, 2026-09-18: the evidence check is a second retrieval system
-— unify it. Live N=3 re-run PASSES the primary substitution-safety
-objective; historical-overlap score partially recovers (40.33 -> 47.0
-mean) and does not reach the full T-032 pre-guard band (54.33) — the
-remaining gap is unrelated model-capability limitations (multi-item
-ordering, negation, coupon math, confirmation flow), not authorization.**
+**CORRECTION (T-043 audit, 2026-09-22): the T-041 claim directly below —
+"the remaining gap is unrelated model-capability limitations... not
+authorization" — is FALSE for roughly half of it.** A direct case-by-case
+comparison of T-032's real trace data against T-041's real trace data
+(same 73 case IDs) found **11 cases that passed reliably at T-032 (7 of
+them a clean 3/3) now fail 0/3 at T-041** — not "pre-existing," genuinely
+broken by the guard chain. Root cause: `_has_pizza_intent` requires an
+entire utterance to be fully pizza-shorthand-explained, so any compound
+order (a pizza plus a drink/side, or a pizza with ordinary filler like
+"I'll pick it up"/"gimme"/plural "mediums") gets wrongly refused on BOTH
+interpreters. Filed as **T-044** (P1). Full evidence:
+`docs/AUDIT_T043.md`'s "PART 5" and EVALS.md's matching section. The
+other ~11 currently-failing overlap cases genuinely are pre-existing
+(failed 0/3 at T-032 too) — T-041's claim was directionally right but
+overstated as "the" explanation when it was only half of it.
+
+**T-041 done, 2026-09-18 (original report, partially superseded above):
+the evidence check is a second retrieval system — unify it. Live N=3
+re-run PASSES the primary substitution-safety objective; historical-
+overlap score partially recovers (40.33 -> 47.0 mean) and does not reach
+the full T-032 pre-guard band (54.33).**
 
 The prior T-039 live gate found zero silent substitutions but a
 historical-overlap collapse (54.33 -> 40.33 mean) root-caused to the
@@ -141,13 +156,17 @@ class T-038's real session found; it does not reappear.
 Full per-case classification, provider usage (tokens/latency/cost), and
 trace paths: `docs/EVALS.md`'s T-041 live-gate section.
 
-**Recommended next task: T-038 Phase 2's remaining item** (real-hardware
-Parakeet voice loop) — the primary, P0-relevant substitution-safety
-objective this gate exists to verify is fully closed and re-confirmed
-live, with zero regressions. The residual overlap-score gap to the T-032
-band is real but is a collection of unrelated, already-tracked model-
-capability limitations, not a reason to keep blocking hardware work on
-this specific gate.
+**Superseded by the T-043 audit (2026-09-22): this "unrelated,
+already-tracked model-capability limitations" framing was only half true
+(see the correction at the top of this section) and the "recommended next
+task: T-038" call is withdrawn.** T-043 found 11 of these overlap failures
+were genuinely caused by the guard chain (`_has_pizza_intent`'s
+whole-utterance-explained design, filed as **T-044**), and separately
+found the live-gate numbers above were measured on a repository mid-write
+by an external process (see T-043's "PART 1 FINDING") — never repeated on
+a confirmed-clean run. **Current recommended next task: T-044**, then a
+live N=3 re-confirmation once Codex is confirmed not pointed at this
+repo. See `docs/AUDIT_T043.md`.
 
 **T-039 live N=3 Experiential acceptance gate: FAIL (evidence-vocabulary
 gap), 2026-09-18. Primary substitution-safety objective PASSES cleanly.**
@@ -1071,13 +1090,29 @@ python evals/runner.py score --adapter llm (N=3, live)    → Run1 62/91 raw, 65
                                                            exceeds refusal) in every run. See "T-041
                                                            done" above for full analysis.
                                                            Historical-overlap mean 47.0 (was 40.33)
-                                                           vs T-032's pre-guard 54.33 — residual gap
-                                                           is unrelated model-capability categories,
-                                                           not authorization. Traces:
+                                                           vs T-032's pre-guard 54.33. CORRECTED
+                                                           (T-043 audit): roughly half this gap is
+                                                           guard-caused (T-044 filed), not "unrelated
+                                                           model-capability categories" as originally
+                                                           claimed here — see docs/AUDIT_T043.md.
+                                                           Traces (re-scored and independently
+                                                           verified byte-for-byte by the T-043 audit;
+                                                           the SCORES held up, only the gap
+                                                           ATTRIBUTION was wrong):
                                                            evals/traces/20260918T142854_llm.jsonl,
                                                            20260918T144342_llm.jsonl,
                                                            20260918T145618_llm.jsonl.
 ```
+
+**T-043 audit note (2026-09-22):** the above N=3 numbers themselves were
+independently re-scored from the real trace files this audit and are
+correct as stated. The repository-write incident during this same run
+window (see `docs/AUDIT_T043.md` PART 1) affects trust in *whether these
+specific live calls executed against uncorrupted code*, not the arithmetic
+on the traces that were produced — those traces are internally consistent
+with the corpus and code that shipped in the `d3355dc` commit. Treat these
+numbers as **provisionally trustworthy, formally unconfirmed** until a
+live re-run happens on a repo confirmed locked against external writers.
 
 Earlier verification (2026-09-18, T-039 live gate, superseded by T-041's
 re-run above), still valid as a historical record:

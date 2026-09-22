@@ -881,12 +881,27 @@ request (unchanged: Experiential reports no `usage.cost` for this model).
 Schema violations: 0 in every run. Hallucinated-SKU calls (all safe
 domain-layer rejections, never mutations): 47/48/41.
 
-**Verdict: T-038 Phase 2 (real-hardware voice loop) is UNBLOCKED.** The
-primary, P0-relevant objective is fully closed and re-confirmed live
-across 3 independent runs with zero regressions; the residual overlap gap
-to T-032's band is a collection of already-tracked, unrelated model-
-capability limitations, not a reason to keep gating hardware work on this
-specific substitution-safety measurement.
+**Verdict (WITHDRAWN by the T-043 audit, 2026-09-22 — see
+`docs/AUDIT_T043.md`): "T-038 Phase 2 is UNBLOCKED" was premature.** The
+"residual overlap gap... is a collection of already-tracked, unrelated
+model-capability limitations" claim below was checked case-by-case against
+T-032's real trace data and is **false for 11 of the 22 currently-failing
+overlap cases** — those 11 passed reliably at T-032 (7 of them 3/3) and
+now fail 0/3, root-caused to `_has_pizza_intent` wrongly rejecting any
+compound utterance (a pizza plus a drink/side, or a pizza with ordinary
+filler like "I'll pick it up"/"gimme"/plural "mediums") on **both**
+interpreters. Filed as **T-044**. The primary, P0-relevant substitution-
+safety objective (zero silent substitutions, zero authorization bypasses)
+remains genuinely closed and re-confirmed — that part of this verdict
+stands — but a second, real, order-correctness defect was found riding
+alongside it, and T-038 Phase 2 should wait for T-044.
+
+**Original text, superseded above:** "T-038 Phase 2 (real-hardware voice
+loop) is UNBLOCKED. The primary, P0-relevant objective is fully closed and
+re-confirmed live across 3 independent runs with zero regressions; the
+residual overlap gap to T-032's band is a collection of already-tracked,
+unrelated model-capability limitations, not a reason to keep gating
+hardware work on this specific substitution-safety measurement."
 
 ## Release gate
 

@@ -2,6 +2,64 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+**T-043 audit is DONE (2026-09-22)** — full ground-truth audit after a
+repository-write incident mid-T-041's live gate. Found: (1) the rewrite
+was strongly suspected as Codex's own crash-restart-and-queue-replay loop
+(different project's prompt, same directory, exact time overlap — see
+`docs/AUDIT_T043.md` PART 1), not fully proven with a literal write-log
+entry; `chat.py` restored, `pricing_engine.py` deleted, both confirmed
+byte-clean against HEAD; (2) the offline gate reproduces identically from
+a clean tree (583/2/2, 91/91, 58/91, 50/50); (3) F5/F6/F14/F17/F18
+mutation-tested and genuinely load-bearing, not vacuous; (4) the
+authorization-boundary question settled: no literal shared function, but
+5 of 6 `RuleBasedInterpreter` `add_item` sites share real evidence
+functions with the LLM path, one (`_new_pizza_half_a_half_b`) doesn't —
+named, not proven unsafe; (5) **T-041's own claim that the T-032→T-041
+overlap-score gap was "unrelated model-capability limitations" was FALSE
+for 11 of 22 currently-failing cases** — a real regression, root-caused
+and filed as **T-044** below. `docs/STATUS.md`/`docs/EVALS.md`/ADR-017
+corrected in place. **Owed, not done:** confirming Codex isn't pointed at
+this repo before the next live N=3 run is trustworthy.
+
+**T-044 · `_has_pizza_intent` wrongly refuses compound/conversational
+pizza orders on BOTH interpreters (found by the T-043 audit)** —
+**Priority:** 1 (order-correctness, not substitution-safety — never adds
+a wrong item, but wrongly refuses a right one for the single most common
+order shape) · **Status:** Not started. `_has_pizza_intent` requires the
+ENTIRE utterance to be fully explained as pizza shorthand — real,
+verified failures: `_has_pizza_intent("small cheese and a can of soda")`
+→ `False` (residual "soda"); `"medium cheese, I'll pick it up"` → `False`
+(residual "'ll pick it up"); `"gimme a lg pep"` → `False` (residual
+"gimme pep"); `"two mediums, plain"` → `False` (residual "mediums plain",
+plural SIZE word gap T-041 didn't cover — only fixed plural "pizzas");
+`"large cheese and a twelve piece wings"` → `False` (residual "twelve
+piece wings" — a legitimate non-pizza item mentioned alongside a pizza
+order isn't consumable by the pizza-shorthand grammar at all). Confirmed
+on `RuleBasedInterpreter` directly too, not just the LLM path's evidence
+check — same utterances produce no pizza, no cart, confusing `search_menu`
+misses instead. This is the primary, verified cause of 11 T-032-passing
+corpus cases (`ADV-001`, `CORRECT-003/004/006`, `GOURMET-013`, `MOD-035`,
+`MULTI-001/005`, `NEG-005`, `SLANG-001/003`) now failing 0/3 at T-041 —
+full per-case trace comparison: `docs/AUDIT_T043.md` PART 5. **Scope:**
+redesign `_has_pizza_intent`/`_pizza_shorthand_residual` to require
+POSITIVE pizza evidence PRESENT somewhere in the utterance rather than
+the WHOLE utterance being fully explained — likely needs the residual
+check to also consume real non-pizza item mentions (treat "a pizza AND
+X" as two separate, independently-evidenced intents, not one utterance
+that must explain itself entirely as pizza) plus a small set of ordinary
+conversational fillers ("I'll", "pick it up", "gimme") and plural SIZE
+words ("mediums", "larges"). **Do not weaken the actual substitution
+guard while fixing this** — the fix is about recognizing MORE real
+evidence, never about accepting less. Add a regression case per fixed
+utterance shape (the 5 above, minimum) plus the 11 named corpus cases as
+end-to-end proof. Re-run the N=3 live gate afterward (blocked until
+Codex-repo-safety is confirmed, see T-043's own carried-forward item
+above) and confirm the historical-overlap score recovers meaningfully
+without reintroducing any authorization bypass (0 silent substitutions
+stays 0). Also roll in `_new_pizza_half_a_half_b`'s unshared gate (T-043's
+"THE AUTHORIZATION QUESTION" finding) while touching this code — either
+route it through the same shared predicate or document precisely why not.
+
 **T-041 is DONE (2026-09-18)** — the mutation-boundary guard's evidence
 check had grown a SECOND retrieval/matching system, independently of
 `search_menu`, with none of its normalization. Part 1 (done before any
@@ -31,7 +89,9 @@ capability categories, not authorization). A label-authoring mistake in
 (ratchet: 58/91, not the mislabeled 61/91). Full mechanism, live-gate
 data, and every consequence: `docs/decisions/ADR-017-no-silent-item-
 substitution.md`'s T-041 amendment; `docs/EVALS.md`'s T-041 live-gate
-section. **T-038 Phase 2 is unblocked** — recommended next task below.
+section. **"T-038 Phase 2 is unblocked" — WITHDRAWN by the T-043 audit
+(2026-09-22): the overlap-gap attribution above was half wrong (see
+T-043/T-044 entries above). Current next task is T-044.**
 
 **T-042 · "Extra X" on a half-portion modifier is interpreted as
 `intensity=DOUBLE`, not a plain addition (found by T-041's live N=3

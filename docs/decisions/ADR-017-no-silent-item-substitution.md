@@ -21,6 +21,20 @@ evidence-matching vocabulary narrower than real customer language. See
 (T-041)" at the end of this document. The authorization DECISION LOGIC is
 unchanged; only the evidence VOCABULARY it matches against grew, via one
 shared normalizer with `search_menu` rather than four independent patches.
+**Audited 2026-09-22 (T-043).** This ADR's own substitution-safety claims
+were re-verified and hold (see `docs/AUDIT_T043.md`'s "THE AUTHORIZATION
+QUESTION" — the one real, named exception is `_new_pizza_half_a_half_b`'s
+regex-only gate, not sharing `_has_pizza_intent`). Separately, the audit
+found `_has_pizza_intent`'s whole-utterance-must-be-fully-explained design
+wrongly rejects compound orders (a pizza plus a drink/side, or ordinary
+filler) on both interpreters — filed as **T-044**, not a substitution
+defect (never adds a wrong item; only over-refuses a right one), but a
+real order-correctness regression this ADR's own T-041 amendment did not
+anticipate. `docs/STATUS.md`/`docs/EVALS.md`'s T-041 sections separately
+over-attributed the post-T-041 overlap-score gap to "unrelated model-
+capability limitations" — corrected in those files; not this ADR's own
+claim, but recorded here for the same reason T-039A's history is kept
+visible instead of edited away.
 
 ## Context
 
