@@ -1,0 +1,131 @@
+# T-039: 73 hand-authored cases never included a single non-pizza item order
+# (salad/calzone/wrap/appetizer) before this file — a real 10-turn voice
+# session found the silent-substitution defect this gap let ship (a garden
+# salad became a small cheese pizza) that no synthetic fixture ever caught.
+# These assert on the FINAL PRICED CART per EVALS.md's standing rule; a case
+# whose correct behavior is asking carries its own follow-up turn.
+
+- id: NONPIZZA-001
+  tags: [non_pizza_item, item_selection, unique_supported_resolution]
+  setup: {order_type: pickup}
+  turns:
+    - user: "I'd like a wrap."
+      calls:
+        - {tool: search_menu, args: {query: wrap}}
+      expect_disambiguation: false
+      forbid: [add_item]
+    - user: "wrap"
+      calls:
+        - {tool: add_item, args: {item: WRAP}}
+  assert_final: {subtotal: "12.00", state: BUILDING}
+
+- id: NONPIZZA-002
+  tags: [invalid, item_not_found, non_pizza_item]
+  # T-039: a real item the menu genuinely doesn't carry — must refuse
+  # cleanly (F7), never invent a substitute.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Do you have nachos?"
+      calls:
+        - {tool: search_menu, args: {query: nachos}, expect_error: NO_MATCH}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: NONPIZZA-003
+  tags: [ambiguity, item_selection, non_pizza_item, substitution_guard]
+  # T-039's own defect, reproduced directly: a compound utterance whose
+  # HEAD item (a garden salad) never resolves, but which also contains a
+  # real topping word (grilled chicken) an interpreter could scavenge out
+  # of the sentence. The cart must stay empty — never a fabricated pizza
+  # carrying just the topping word that happened to be recognizable.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A garden salad, medium, with grilled chicken."
+      calls:
+        - {tool: search_menu, args: {query: "garden salad medium grilled chicken"}}
+      forbid: [add_item]
+  assert_final: {subtotal: "0.00", state: BUILDING}
+
+- id: NONPIZZA-004
+  tags: [non_pizza_item, entity_extraction, substitution_guard]
+  # T-039's two-liter-vs-can distinction: a specific drink size must never
+  # collapse into the generic catch-all word trailing it in the same query.
+  setup: {order_type: pickup}
+  turns:
+    - user: "A two liter coke, please."
+      calls:
+        - {tool: add_item, args: {item: "2LITER"}}
+  assert_final: {subtotal: "4.00", state: BUILDING}
+
+- id: NONPIZZA-005
+  tags: [ambiguity, item_selection, non_pizza_item, explicit_next_turn_selection]
+  # A real, genuinely ambiguous non-pizza item (two real SKUs: GARDEN SALAD
+  # SM/LG) — the correct behavior is asking, not guessing a size.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Can I get a garden salad?"
+      calls:
+        - {tool: search_menu, args: {query: "garden salad"}}
+      expect_disambiguation: true
+      forbid: [add_item]
+    - user: "the small one"
+      calls:
+        - {tool: add_item, args: {item: "GARDEN SALAD SM"}}
+  assert_final: {subtotal: "5.00", state: BUILDING}
+
+- id: NONPIZZA-006
+  tags: [ambiguity, item_selection, non_pizza_item, persisted_narrowing]
+  # "The garden one" confirms the product family but not the remaining size
+  # attribute. Correct behavior is another question and an empty cart until
+  # the following explicit size selection.
+  setup: {order_type: pickup}
+  turns:
+    - user: "I want a salad."
+      calls:
+        - {tool: search_menu, args: {query: salad}}
+      expect_disambiguation: true
+      forbid: [add_item]
+    - user: "The garden one."
+      calls: []
+      forbid: [add_item]
+    - user: "Large."
+      calls:
+        - {tool: add_item, args: {item: "GARDEN SALAD LG"}}
+  assert_final: {subtotal: "8.00", state: BUILDING}
+
+- id: NONPIZZA-007
+  tags: [ambiguity, non_pizza_item, unsupported_model_search, substitution_guard]
+  # T-039B adversarial provenance case. The customer's word is "salad"; a
+  # model-controlled unique search for WRAP/CAN/gourmet is not evidence and
+  # must not mutate. The executable exact-query/reason-code proof lives in
+  # tests/test_t039b_candidate_authorization.py; this corpus case records the
+  # customer-correct multi-turn outcome and final priced cart.
+  setup: {order_type: pickup}
+  turns:
+    - user: "I want a salad."
+      calls:
+        - {tool: search_menu, args: {query: salad}}
+      expect_disambiguation: true
+      forbid: [add_item]
+    - user: "The large garden salad."
+      calls:
+        - {tool: add_item, args: {item: "GARDEN SALAD LG"}}
+  assert_final: {subtotal: "8.00", state: BUILDING}
+
+- id: NONPIZZA-008
+  tags: [ambiguity, invalid_candidate, non_pizza_item, substitution_guard]
+  # A proposed SKU outside the outstanding salad candidate set is forbidden;
+  # the customer must explicitly choose from the real candidates before any
+  # item exists. Exact outside-set rejection is asserted at the mutation
+  # boundary in tests/test_t039b_candidate_authorization.py.
+  setup: {order_type: pickup}
+  turns:
+    - user: "Can I get a salad?"
+      calls:
+        - {tool: search_menu, args: {query: salad}}
+      expect_disambiguation: true
+      forbid: [add_item]
+    - user: "The small garden salad."
+      calls:
+        - {tool: add_item, args: {item: "GARDEN SALAD SM"}}
+  assert_final: {subtotal: "5.00", state: BUILDING}

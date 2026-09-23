@@ -10,8 +10,9 @@ import pytest
 from lakewood import orders as oe
 from lakewood.orders import (
     UNAVAILABLE, add_item, add_modifier, begin_confirmation, cancel_order,
-    confirm_order, remove_item, remove_modifier, request_quote,
-    screen_utterance, set_order_type, transfer_to_human, update_item,
+    confirm_order, mark_disclosure_played, remove_item, remove_modifier,
+    request_quote, screen_utterance, set_order_type, transfer_to_human,
+    update_item,
 )
 
 
@@ -156,6 +157,24 @@ def test_f8_card_number_transfers_and_is_not_stored(sess):
 ])
 def test_f9_allergy_always_transfers(sess, utterance):
     assert screen_utterance(sess, utterance)["reason"] == "allergy"
+
+
+# --- T-057: call-recording disclosure (docs/SECURITY_AUDIT_T054.md,
+# finding T054-04 — no disclosure/consent mechanism existed anywhere) -----
+
+def test_mark_disclosure_played_sets_a_timestamp(sess):
+    assert sess.disclosure_played_at is None
+    r = mark_disclosure_played(sess)
+    assert r["status"] == "ok"
+    assert sess.disclosure_played_at is not None
+    assert r["disclosure_played_at"] == sess.disclosure_played_at
+
+
+def test_mark_disclosure_played_is_idempotent(sess):
+    mark_disclosure_played(sess)
+    first = sess.disclosure_played_at
+    mark_disclosure_played(sess)
+    assert sess.disclosure_played_at == first  # never re-timestamped
 
 
 def test_f7_unknown_topping_returns_candidates_not_a_guess(pickup):

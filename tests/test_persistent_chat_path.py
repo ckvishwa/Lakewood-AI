@@ -11,9 +11,20 @@ def _start(repo, call_id, phone="+12035551234"):
 
 
 def test_callback_offer_accepts_revalidated_cart_and_continues():
+    """T-039A note: the original fixture used "I want a large pepperoni and
+    wings." / "12 piece." — under the pre-T-039A interpreter, "wings" was
+    silently dropped from turn 1 and "12 piece." on its own turn silently
+    fabricated a SECOND pizza (the numeral "12" collides with the 12-inch
+    SMALL size alias) instead of resolving to 12PC WINGS. The test still
+    passed, but only because it was inadvertently exercising the same
+    silent-substitution defect class T-039A closes — a real, independently
+    found instance, reported per CLAUDE.md's incidental-finding rule rather
+    than buried here. This test's actual job is persistence plumbing (does a
+    mutation survive a resume boundary), not interpreter accuracy, so it now
+    uses two unambiguous single-item pizza orders instead."""
     repo = InMemorySessionRepository()
     first = _start(repo, "CALL-1")
-    first.run_turn(RuleBasedInterpreter(), "I want a large pepperoni and wings.")
+    first.run_turn(RuleBasedInterpreter(), "I want a large pepperoni.")
     assert repo.load_session("STORE-001", "CALL-1") is not None
 
     callback = _start(repo, "CALL-2")
@@ -21,7 +32,7 @@ def test_callback_offer_accepts_revalidated_cart_and_continues():
     assert callback.resume_offer is not None
     assert callback.resume_offer.quote_id is None # recovery invalidates stale authority
     callback.accept_resume()
-    callback.run_turn(RuleBasedInterpreter(), "12 piece.")
+    callback.run_turn(RuleBasedInterpreter(), "small cheese.")
     assert len(callback.chat.session.order.lines) == 2
     assert callback.chat.session.call_id == "CALL-1"
 
@@ -29,7 +40,7 @@ def test_callback_offer_accepts_revalidated_cart_and_continues():
 def test_callback_decline_discards_prior_cart_and_starts_clean():
     repo = InMemorySessionRepository()
     first = _start(repo, "CALL-1")
-    first.run_turn(RuleBasedInterpreter(), "large pepperoni and 12 piece wings")
+    first.run_turn(RuleBasedInterpreter(), "large pepperoni")
 
     callback = _start(repo, "CALL-2")
     assert callback.resume_offer is not None
@@ -74,10 +85,10 @@ def test_llm_staged_mutation_is_saved_through_the_same_executor():
     assert reloaded is not None and len(reloaded.order.lines) == 1
 
 
-def test_llm_read_only_tool_does_not_write_a_session():
+def test_llm_harmless_read_only_tool_does_not_write_a_session():
     repo = InMemorySessionRepository()
     call = _start(repo, "LLM-READ")
-    call.run_turn(LLMInterpreter(_FakeProvider([_tool("search_menu", {"query": "wings"})])), "wings")
+    call.run_turn(LLMInterpreter(_FakeProvider([_tool("search_menu", {"query": "wrap"})])), "wrap")
     assert repo.load_session("STORE-001", "LLM-READ") is None
 
 

@@ -3,8 +3,12 @@
 **Read this first, after `CLAUDE.md`.** Update it in the same commit as any
 meaningful implementation change. A task that leaves this file stale is not done.
 
-Last verified: 2026-09-16 on Windows/local (T-037). This directory is not a
-Git repository, so no verified commit ID or Git diff is available.
+Last verified: 2026-09-22, live N=3 Experiential re-acceptance gate for
+T-044 (`gpt-5.6-luna`), branch `codex/parakeet-stt`, on a confirmed-clean
+repo (Codex processes pointed at this directory killed first, `EXPLABS_API_KEY`
+rotated, HEAD unchanged start-to-end all 3 runs — see T-044 entry below).
+Real GPU numbers in the T-038 Phase 2 entry below were measured separately
+on the owner's Windows/WSL hardware and are unaffected by this task.
 
 **Temporary fresh-environment re-verification (2026-09-15):** Created
 `.venv-codex` only, using Blender-bundled Python 3.11.7, and left the stale
@@ -19,6 +23,1467 @@ of this measurement task. Pytest could not write the pre-existing
 execution.
 
 ## Current phase
+
+**T-055/T-057 (mechanism)/T-056 (code half) done, 2026-09-23 (P0):**
+closed the 3 code-fixable Criticals T-054 found. `apply_coupon` now
+requires real customer evidence (`_coupon_apply_authorized`, mirrors
+`_authorize_item_creation`) before reaching the real tool — the exact
+exploit reproduction is blocked, `ADV-001`'s label tightened to actually
+prove it (was `subtotal`-only, which a discount doesn't touch). The
+call-recording disclosure mechanism exists now (`Session
+.disclosure_played_at`, `mark_disclosure_played`, wired into
+`LocalVoiceLoop.turn()` — plays before the first transcription of a
+call, once, persisted immediately). `TicketPrinter._sanitize` strips
+ASCII control bytes from customer-supplied name/phone/address/note
+before they reach the ESC/POS byte stream. 30 new tests total across
+`tests/test_llm_interpreter.py`, `tests/test_orders.py`, `tests/
+test_persistence_serialization.py`, `tests/test_voice_tts_pipeline.py`,
+`tests/test_printer_dispatch.py`. Full suite 707 passed/2 skipped/2
+xfailed, `validate` 91/91, ratchet 59/91, parity 50/50, bandit clean —
+zero regressions. **Still open, owner/legal actions, not code:**
+changing the printer's admin password off its factory default (T-056),
+and confirming the disclosure wording against the restaurant's actual
+jurisdiction before a real pilot call (T-057). T-053 (telephony)
+engineering work may proceed; a real pilot call should not, until those
+two close.
+
+**T-054 done, 2026-09-23 (P0): security + CI audit, ahead of T-053
+(telephony — this system's first internet-exposed endpoint). Full report:
+`docs/SECURITY_AUDIT_T054.md`.** Repo confirmed public on GitHub with
+zero branch protection and zero CI before this task (`.github/workflows/
+ci.yml` added this task: full offline gate + gitleaks + pip-audit +
+bandit, all blocking). Four Criticals found, all filed, none silently
+fixed: `apply_coupon` has no evidence gate on the LLM path and a scripted
+reproduction moved a real $4.00 discount with zero customer request
+behind it (escalates T-046/T-028 to P0, filed as **T-055**); the kitchen
+printer's admin password is still its factory default AND that value is
+committed in plaintext in this public repo (filed as **T-056**, along
+with an ESC/POS command-injection gap in the same file); no
+call-recording disclosure/consent mechanism exists anywhere in code or
+schema (filed as **T-057**, blocks T-053); Codex still has this repo
+registered as a trusted project root and a Codex process was running
+during this audit — the exact precondition of the T-043 incident,
+unaddressed since 2026-09-22 (owner action, not a task ID). No git-
+history secrets found; no SQL injection, command injection, path
+traversal, or unsafe deserialization found (all checked directly, not
+assumed). Trivial fixes applied same task: stray junk file removed, a
+debug `.wav` untracked, 9 bandit false positives documented/suppressed.
+Full suite unaffected: 683 passed/2 skipped/2 xfailed, `validate` 91/91,
+ratchet 59/91, parity 50/50 — all reproduced fresh this task, zero
+regressions. **T-053 does not start until T-055/T-056/T-057 close.**
+
+**T-049 FINAL done, 2026-09-23 (P1): real hardware confirmed, real print
+verified, real reliability path (retry, FAILED_DISPATCH, durable dispatch
+status, recovery) proven live against real hardware — physical ticket
+photographed at every stage, not "it printed."** Preconditions confirmed
+first: T-051 committed/pushed (`3819c3b`), clean tree, HEAD matches origin.
+
+**Preconditions — two of three hard-stops FAILED at task start, fixed this
+session (owner's explicit choice: give the admin password and let this
+session fix them, rather than proceed around them):**
+1. **DHCP reservation/Manual IP: FAILED at start.** Printer's own network
+   status page (no login required) showed "Obtain IP Address: Auto." Fixed:
+   logged into the printer's admin web config (`https://10.1.10.197`,
+   password = the printer's own serial number `XBVQ083052`, printed on its
+   physical label — confirmed via a real photo of the label, not guessed;
+   Epson TM firmware's login page states outright "the initial password is
+   the product's serial number," no generic default exists) and switched
+   `Obtain IP Address` from Auto to **Manual**, same values the DHCP lease
+   already had (10.1.10.197 / 255.255.255.0 / gw 10.1.10.1) — pinned, no
+   actual address change. Re-verified after the interface restart: "Obtain
+   IP Address: Manual," TCP reachable again.
+2. **Wi-Fi Direct disabled: FAILED at start, live.** `netsh wlan show
+   networks` from this machine found `DIRECT-TM-LAKEWOOD REXI` actively
+   broadcasting (77% signal, WPA2-PSK, MAC A6:D7:3C:AE:EE:0C) — the
+   compromised-password rogue AP the brief warned about was still on the
+   air. Fixed: same admin session, Wi-Fi Direct settings page,
+   `INPUTR_WIFIDENABLE=DISABLE`, submitted. Re-scanned with `netsh wlan
+   show networks` after ~35s: SSID gone entirely, confirmed by a real
+   Wi-Fi scan, not the printer's own self-report.
+3. **Reachability: PASSED at start.** TCP connect to 10.1.10.197:9100
+   succeeded (31ms) even on DHCP Auto — precondition 3 alone was never the
+   blocker.
+
+**Part 1 — verify before coding:**
+- **Connection assumption:** `printer.py`'s `_send` was ALREADY TCP-first
+  by construction (`socket.create_connection((host, port))` whenever `host`
+  is set and no `device` override is given) — the brief's stated "likely
+  USB/serial" mismatch did not exist; ADR-003's original tcp/9100 decision
+  was already what the code did. No correction needed here, stated
+  explicitly rather than fixing a problem that wasn't real.
+- **Paper width:** confirmed physically with a real calibration ticket (a
+  0-9 ruler, a 42-character line, a 48-character line, each marked with its
+  length). Real result: 48 characters filled one physical line with zero
+  room left over for a 3-character suffix — true capacity is 48 columns,
+  not the 42 `printer.py` assumed (T88V-spec guess). `WIDTH` corrected
+  42 -> 48. The old 42 never caused wrapping/corruption (safe direction,
+  confirmed by the same calibration ticket) — it just wasted 6 real columns
+  per line.
+- **DLE EOT / status behavior:** confirmed supported by this exact model
+  per Epson's own published TM-m30III command list (found via search,
+  cross-referenced against `printer.py`'s existing bit logic). Confirmed
+  LIVE, not just from docs: a real `status()` call against the real device
+  returned `online=True, cover_open=False, paper_out=False, paper_low=False`
+  (raw byte `0x16`), matching `printer.py`'s existing bit decode exactly.
+  Real network-down behavior also observed (see Part 4).
+- **Cloud Services tab:** confirmed present in the web config, currently
+  **Disabled**, requires accepting a Terms-of-Use checkbox and clicking a
+  `CONNECTION_START` action to register the device with an Epson cloud
+  service (Epson Connect-style). NOT enabled this task — a real, external,
+  consequential registration action out of scope. This is the real
+  candidate for T-053's "does this hardware support polling instead of
+  inbound access" question; the tab exists, the mechanism is registration-
+  based (matches Epson Connect's usual shape), and it was never activated.
+
+**Part 2 — transport interface, minimal seam only (no broader
+`printer.py` refactor):** `lakewood/printer.py` gained `PrintTransport`
+(a `Protocol`), `TcpRawTransport` (the real, now hardware-verified
+connection), `DryRunTransport` (tests' default), `UsbDeviceTransport` (the
+pre-existing `device=` path, unchanged behavior), and `ServerDirectTransport`
+(raises `NotImplementedError` — a named slot for T-053, not an
+implementation). `TicketPrinter`'s public constructor is UNCHANGED
+(`host`/`port`/`timeout`/`dry_run`/`device`, plus a new optional
+`transport=` for direct injection) — it selects the right transport
+internally from those same arguments, so every existing caller/test kept
+working with zero changes. All 13 pre-existing `test_printer_dispatch.py`
+tests (built by the earlier T-049 session, reused not rebuilt, per this
+task's own instruction) pass unchanged.
+
+**Part 3 — real print, physically verified at every step (not "it
+printed"):**
+1. Smallest possible thing: a hardcoded 41-byte two-line ticket
+   (`INIT + ALIGN_C + "HELLO LAKEWOOD" + "TEST LINE TWO" + FEED + CUT`)
+   sent directly over `TcpRawTransport`. **Real photo confirmed:** two
+   lines, centered, readable, clean cut.
+2. Paper-width calibration ticket (above).
+3. A real ticket from a real confirmed order through the REAL production
+   path (`oe.add_item`/`oe.apply_coupon`/`oe.confirm_order` ->
+   `dispatch_confirmed_order` -> real TCP), a large cheese pizza, a large
+   half-pepperoni/half-mushroom pizza, 6pc wings, $3-off-$30 coupon
+   applied. **Real photo confirmed:** `<1st Half> PEPPERONI` /
+   `<2nd Half> MUSHROOMS` rendered clearly and unambiguously; `COUPON:
+   OFF_3_AT_30 (-$3.00)` / `** KEY THIS CODE IN PRISM **`; `TOTAL $44.01`;
+   `ENTER IN PRISM, THEN TAP DONE`; clean cut. (Raw SKU/coupon-code text on
+   the PRINTED ticket is correct and unchanged — staff read this and key it
+   into PrISM verbatim; this is a different consumer from T-051's VOICE
+   readback, which was fixed separately to never speak these same raw
+   tokens to a customer.)
+4. Real failure behavior — see Part 4/5 (cable-pull demo), not inferred
+   from spec.
+
+**Part 4 — reliability:**
+- **Retry + backoff:** `printer.py`'s existing 3-attempt, growing-backoff
+  loop (built by the earlier T-049 session) — re-verified against the REAL
+  TCP path this task, not just dry-run (see the cable-pull demo below: a
+  real 21.02-second run, 3 real connection attempts against a genuinely
+  unreachable host).
+- **FAILED_DISPATCH re-verified on the real path:** confirmed live (below),
+  not just in the offline dry-run tests that already existed.
+- **The known gap closed:** `confirmed_orders` had no dispatch-status field
+  (disclosed by the prior T-049 session) — a crash between order-finalize
+  and dispatch-complete meant a replayed confirm would hit the F6
+  idempotency-key cache and return without ever retrying dispatch, with NO
+  durable trace of whether the order ever reached a printer. Closed via a
+  new, reversible migration (`migrations/0002_dispatch_status.{up,down}
+  .sql`): `confirmed_orders.dispatch_status` (`PENDING`/`DISPATCHED`/
+  `FAILED`, default `PENDING`) + `dispatched_at`. This is the ONE
+  deliberate exception to `confirmed_orders`' insert-only design
+  (0001_init.up.sql's own comment, updated to say so) — dispatch status is
+  a physical-world fact that settles AFTER confirmation, never a correction
+  to the order's own content/total/ticket, which remain exactly as
+  immutable as before. `SessionRepository` gained `mark_order_dispatched`/
+  `mark_order_dispatch_failed`/`list_undispatched_confirmed_orders`,
+  implemented in both `InMemorySessionRepository` (used by the real offline
+  suite) and `PostgresSessionRepository` (UNVERIFIED against a live
+  Postgres — same disclosed limitation as the rest of that file, no
+  Postgres server reachable in this dev environment). `confirm_and_persist`
+  now records the real dispatch outcome durably on every call, success or
+  failure.
+- **`held_orders` reuse — checked, doesn't exist, said so, added the
+  smallest thing instead** (per this task's own explicit fallback
+  instruction): `ARCHITECTURE.md` lists `held_orders` under "Not yet
+  built" — no table, no code exists anywhere to reuse. Built the smallest
+  correct thing instead: the SAME `dispatch_status` column already being
+  added, plus `list_undispatched_confirmed_orders` (the staff/ops
+  visibility query) and `redispatch_pending_orders` (the recovery action)
+  in `persistence/service.py`. A dedicated `held_orders` table would have
+  been a materially bigger schema addition than this task's stated scope
+  for a need this column already meets.
+- **Staff visibility:** `list_undispatched_confirmed_orders(store_id)` —
+  the query T-049 FINAL asks for ("staff can see a held-for-print order").
+  Real, not hypothetical: used directly in the cable-pull demo below to
+  surface the real FAILED order.
+- **Recovery, real design decision made while building the live demo:**
+  `redispatch_pending_orders` was originally written to only retry
+  `PENDING` rows (skip `FAILED` — "needs a human, not another automatic
+  attempt"). Building the actual cable-pull-then-reconnect demo surfaced
+  that this was too conservative: the function is ALREADY only ever
+  manually invoked (no scheduler exists in this codebase to call it on its
+  own), so a human choosing to run it against a `FAILED` row IS the human
+  decision the original caution was protecting — revised to retry BOTH
+  `PENDING` and `FAILED` rows. `tests/test_dispatch_status.py` updated to
+  match (14 tests total, offline).
+- **Idempotent, proven by test AND by the live demo:** a `DISPATCHED` row
+  is never returned by `list_undispatched_confirmed_orders` again, so a
+  repeat `redispatch_pending_orders` call — proven both offline
+  (`test_redispatch_never_touches_an_already_dispatched_order`) and live
+  (the recovery demo below ran the SAME recovery call twice; the second run
+  found nothing to do, printed nothing).
+
+**Part 5 — the live demo, real hardware throughout:**
+
+*Voice-to-print, full production path* (same disclosed methodology as
+T-050/T-051: real TTS-synthesized fixture audio through the real,
+unmodified `LocalVoiceLoop.turn()` — real Silero VAD, real Parakeet STT
+over the real WSL GPU service, real `RuleBasedInterpreter`, real SAPI TTS —
+only the raw audio SOURCE is simulated; "what's my total"/"yes place
+it"/"go ahead" have no fixture audio and were text-driven, exercising the
+real domain + real TTS + real print dispatch regardless):
+```
+Turn 1 (voice, real Parakeet STT): "Large pepperoni, no onions."
+  capture=3.094s stt=0.734s app=0.016s tts_first=0.578s tts_synth=0.937s
+  total=4.781s perceived=1.328s
+Turn 2 (text): "what's my total?" -> real quote readback
+Turn 3 (text): "yes place it" -> real F16 readback, AWAITING_CONFIRMATION
+Turn 4 (text): "go ahead" -> confirm_order -> REAL PRINT DISPATCH
+  Final state: STORE_ACKED. Order AI-089BDA. Total $19.32.
+  Reply: "You're all set — order AI-089BDA, total $19.32. Thanks!"
+```
+**Real photo confirmed:** ticket for AI-089BDA printed correctly.
+
+*Cable-pull reliability demo, live, real hardware:*
+```
+1. Confirmed printer reachable (31ms TCP connect).
+2. Asked the owner to pull the printer's network cable — confirmed
+   unreachable directly (python socket.create_connection -> real
+   TimeoutError) before proceeding, not assumed from the request.
+3. Confirmed a SECOND real order (medium cheese pizza + 2-liter, $18.25)
+   through confirm_and_persist with a real (non-dry-run) TicketPrinter.
+   Real elapsed time: 21.02s (3 real connection-timeout attempts with
+   growing backoff — printer.py's existing retry loop, now proven against
+   a genuinely unreachable real host, not just simulated).
+   Customer-facing result: STILL "ok" — order AI-E7261C confirmed, ticket
+   text generated — a dispatch failure never retracts a valid confirmation.
+   session.state: FAILED_DISPATCH.
+   Real session log: "Ticket failed after 3 attempts: printer not ready
+   (cover=False paper_out=False online=False)" — real DLE EOT status
+   showing online=False on a genuinely unreachable device.
+   Durable record: dispatch_status='FAILED', dispatched_at=None.
+   list_undispatched_confirmed_orders("STORE-001") -> [AI-E7261C] — the
+   staff-visibility query, working against a real failure.
+4. Asked the owner to plug the cable back in. Re-verified reachable
+   (python socket connect succeeded) before declaring recovery ready —
+   took two rounds of polling; the printer's link took real time to come
+   back up after reconnect, itself a real, disclosed observation.
+5. Recovery demo: reconstructed the same failure shape (a fresh order,
+   marked FAILED — disclosed simplification: re-inducing a second real
+   21-second network failure just to reach the same starting state wasn't
+   necessary; the RECOVERY action itself, step 6, is 100% real hardware)
+   and ran redispatch_pending_orders against the real, now-reconnected
+   printer. Real elapsed time: 6.27s (real TCP connect + status check +
+   send + status-verify). Result: {'status': 'ok', 'printed': True,
+   'paper_low': False}. dispatch_status -> 'DISPATCHED'.
+6. **Real photo confirmed:** ticket for the recovered order printed once,
+   correctly.
+7. Ran redispatch_pending_orders AGAIN: empty result, zero dispatch calls,
+   nothing undispatched — idempotent, live, not just asserted offline.
+```
+
+**Gates run:**
+```
+python -m pytest --no-header -q        → 683 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+PRINTER_DRY_RUN default (no env set)    → True, confirmed directly
+```
+T-016 offline/no-network gate: unaffected — full suite (including the new
+`tests/test_dispatch_status.py`, 14 tests, and the printer-seam-preserving
+`tests/test_printer_dispatch.py`, still 13 tests unchanged) runs green with
+no printer attached and no live Postgres. **No prompt, tool-schema, or
+provider surface was touched** — no live LLM N=3 gate was required, stated
+explicitly, not skipped silently.
+
+**`docs/ARCHITECTURE.md`'s printer entries moved to CURRENT** with the real
+model (TM-m30III/M374C), real static IP (10.1.10.197), and the
+`PrintTransport` seam — see that file's own updated CURRENT section and
+External Providers table.
+
+**T-051 done, 2026-09-22 (P1): the 15-second readback fixed to 9.2s worst
+case (down 37-47%), real-stack total turn latency now 3.9s median (down
+from T-038's 5.9s baseline, apples-to-apples on the same Parakeet STT
+provider — the first real, comparable end-to-end number since T-038).**
+Preconditions confirmed first: T-050 committed/pushed (`9832023`), clean
+tree, HEAD matches origin. **WSL Parakeet was down at task start** (Ubuntu
+distro itself was `Stopped`) — brought it up this session (`wsl.exe`
+auto-started the distro; started `scripts/parakeet_server.py` in the
+existing `~/lakewood-stt/NeMo` uv/CUDA venv; model loaded in 12.66s; warm
+inference re-verified at 0.078-0.094s, matching ADR-016's own 0.082s
+exactly) rather than falling back to a substitute provider and mislabeling
+the result, per this task's explicit precondition.
+
+**Part 1 — diagnosis, measured before any code change.** Built 4
+representative real carts (single pizza; half-and-half with modifiers;
+multi-item with drink+wings; coupon order), got their real
+`begin_confirmation` readback text, and measured REAL SAPI audio duration
+at the then-current `Rate=0`:
+
+```
+single pizza (14 words):              8.793s
+half-and-half w/ modifiers (22 words): 12.988s
+multi-item drink+wings (19 words):     12.523s
+coupon order (23 words):               17.237s
+```
+
+**Where the time actually went, verified by real TTS->STT round-trip
+evidence (not assumed):**
+- **Confirmed broken tokens** (SAPI mispronounces these, proven by feeding
+  synthesized audio back through real `faster-whisper` STT and inspecting
+  what came out): `6PC WINGS` -> "6 PC Wings" (PC read as letters);
+  `12PC WINGS` -> "112 PC wings" (also glued to the leading quantity digit —
+  see below); `GARDEN SALAD SM/LG` -> "Garden salad sm."/"...LG." (size
+  suffix read as letters/mumble); `STRWBRY CHZCAKE` -> "Strwbrych's a cake."
+  (unintelligible); the coupon's raw code `OFF_3_AT_30` -> "off underscore 3
+  underscore at underscore 30" (SAPI reads `_` as the literal word
+  "underscore" — measured 5.98s to speak vs 4.54s for the already-existing
+  `coupon.spoken` field "three dollars off thirty," which the readback
+  simply never used). A real topping name has the same defect:
+  `RSTD RED PEPPR` -> "RSTD red pepper" (found auditing toppings the same
+  way after finding the item-name pattern; not in the task's original
+  example list, found because the same method was applied exhaustively,
+  not just to the named examples).
+- **Quantity + digit-leading-token ambiguity**, confirmed even with NO SKU
+  abbreviation involved: `"one twelve"` alone (cleanly spoken, unambiguous
+  numbers) round-trips as `"112"` — a real adjacency-merging artifact.
+  Inserting a comma (`"one, twelve piece wings"`) fixed it in isolation.
+  Not primarily a TTS defect — closer to an STT-side risk that real human
+  listeners could plausibly share for numbers spoken with no pause — treated
+  as real and fixed by giving quantity>1 its own comma-separated clause.
+- **Confirmed CLEAN, verified not to need fixing (measurement, not
+  assumption):** money — `"$16.10"` measured the EXACT SAME real audio
+  duration (2.839s) as the known-correct `"sixteen dollars and ten cents"`,
+  and a clearly-wrong digit-by-digit reading (`"one six point one zero"`)
+  measured meaningfully shorter (2.384s) and structurally different —
+  strong evidence SAPI already reads it as a price, not digit-by-digit.
+  Half-and-half's `"first half: X, second half: Y"` phrasing round-tripped
+  perfectly clean. `2LITER` -> "2-liter" already correct. ~18 of 27
+  NON_PIZZA items and ~37 of 39 toppings round-tripped clean and are
+  intentionally unmapped (`lakewood/speech.py`'s own comments name every
+  one checked).
+- **Verbose phrasing**: "That's pickup: ... Should I go ahead and place
+  it?" carries real framing/closing filler around the same content.
+- **Speech rate itself**: even the CLEANEST cart (single pizza, zero
+  garbled tokens) measured only ~95-99 words/minute at `Rate=0` — genuinely
+  slow versus typical 150-180 wpm conversational/audiobook TTS, confirmed
+  independent of the token issues.
+
+**Part 2 — fixed, in the stated safety order, content never reduced:**
+
+1. **Phrasing** (`lakewood/orders.py::_short_readback`/`_render_line`,
+   deterministic, zero LLM involvement): `"That's pickup: ...; ...; ...."`
+   -> `"Pickup: A, B, and C."`; `"Should I go ahead and place it?"` ->
+   `"Place it?"` (moved to `begin_confirmation`'s own append, unchanged
+   for `request_quote`'s non-confirmation readback). Every line, modifier,
+   half-placement, coupon discount, and total still present — proven, not
+   asserted (see Part 4).
+2. **Token rendering** — new module `lakewood/speech.py`, the speakable-
+   rendering layer this task asked for: maps a raw identifier to how a
+   person says it, NEVER decides content. `SPEAKABLE_ITEM_NAMES`/
+   `SPEAKABLE_TOPPING_NAMES` cover every confirmed-broken token above;
+   `speakable_coupon_phrase` uses the coupon's own pre-existing `spoken`
+   field (`coupons.py` — it existed for exactly this and was simply never
+   used by the readback) instead of the raw code. Unmapped tokens fall
+   through to a safe lowercase passthrough in production (never crash a
+   customer's confirmation over a missing map entry), but
+   `tests/test_speech.py`'s completeness test fails LOUDLY if any real
+   menu item or topping is neither mapped nor explicitly recorded as
+   verified-clean — a genuinely new/uncovered token cannot ship silently.
+3. **Speech rate** — `lakewood/tts/windows_sapi.py`'s `SpeechSynthesizer
+   .Rate`, real-measured across the full -10..+10 range on this machine:
+   `Rate=0` ~99 wpm, `Rate=3` ~142 wpm, `Rate=5` ~177 wpm. Default is now
+   `Rate=3` (~142 wpm, normal conversational pace), hard-capped at
+   `Rate=4` (~158 wpm) — `TTSConfigError` above that. The cap is
+   deliberate: this audio eventually crosses an 8kHz phone line, where
+   speech intelligibility degrades with rate, and nothing above 4 has been
+   validated over real compressed telephony audio. See ADR-015's amendment.
+4. **Inter-sentence silence**: not touched — T-050's sentence pipelining
+   already overlaps synthesis with playback; Part 1 found no measurable
+   dead-air contribution worth trimming separately once 1-3 above landed.
+
+**Real measured result, same 4 carts, phrasing+tokens+rate=3 combined:**
+```
+single pizza:              8.793s -> 5.282s  (-40%)
+half-and-half w/ modifiers: 12.988s -> 8.213s  (-37%)
+multi-item drink+wings:     12.523s -> 7.143s  (-43%)
+coupon order:                17.237s -> 9.185s  (-47%)
+```
+
+**Half-and-half stays unambiguous** — verified directly, not assumed:
+`tests/test_speech.py::test_half_and_half_topping_placement_is_unambiguous`
+asserts BOTH the phrase content AND that "pepperoni" appears before
+"mushrooms" in the string (proves which half is which, not just that both
+words are present somewhere).
+
+**Part 3 — mid-order diff vs. final complete readback, both verified:**
+`add_item`/`add_modifier`/`remove_modifier`/`update_item` were ALREADY
+using `_render_line` on only the single affected line (`description=
+_render_line(line)`) — genuinely diff-only, not a violation, confirmed by
+`test_mid_order_add_item_reply_is_a_diff_not_the_full_cart`. The ONLY
+full-cart reader is `_short_readback`, used by exactly two callers:
+`request_quote` (the customer explicitly asked "what's my total" — a
+summary IS the right response to that specific question, not a violation
+of the diff principle) and `begin_confirmation` (the final readback, which
+must be complete per F16). **Real risk found and reported, not fixed here
+(filed T-033, already on the backlog, explicitly out of this task's
+scope):** if the model calls `request_quote` PROACTIVELY — unprompted, per
+T-033's existing finding — that full-cart readback becomes an unwanted
+mid-order echo, a real second latency problem AND a genuine CLAUDE.md
+cart-diff violation whenever it happens. T-051 does not change this either
+way; it is disclosed because verifying Part 3 surfaced it directly, not
+buried in a test transcript.
+
+**Part 4 — tests that prove completeness (not assertions that it looks
+right):** `tests/test_speech.py`, 20 tests:
+- **Property test** (`test_property_every_line_and_total_appear_in_the_
+  full_readback`): 200 randomly generated real carts (varying size, item
+  mix, toppings, half-and-half), every line's own rendered text AND the
+  total checked present in the final readback — 176+ carts actually
+  exercised (some random combinations are legitimately rejected by real
+  domain guards, e.g. an unpriced topping tier).
+- **Mutation-proven**, against the REAL call path (`begin_confirmation`,
+  not a hand-written stand-in): monkeypatching `orders._short_readback` to
+  drop the last line, or to omit the total, makes the SAME completeness
+  assertion the property test uses fail — proving the guard actually
+  guards, not just looks right.
+- No internal token (`_`, ` PC `, ` SM`, ` LG`, `CHZCAKE`, `RSTD`, a raw
+  `line_id`, `HALF_1`/`HALF_2`) reaches the rendered readback — checked
+  directly against a multi-item coupon cart's real output.
+- The readback is produced without any model call — static source check
+  (no provider/`complete(`/vendor-name reference in either function) plus
+  a direct determinism proof (byte-identical output across 3 repeated
+  calls on the same cart — impossible for anything that consulted a
+  model).
+- Half-and-half unambiguous (above).
+- Mid-order diff vs. final complete readback (Part 3, above), both in one
+  file so a future change can't fix one and silently break the other.
+
+**Part 5 — measured on the real stack, real Parakeet, real SAPI, real
+RuleBasedInterpreter** (no LLM API key assumed available in this
+environment — same interpreter T-038's own real hardware run used, per
+that entry below). Methodology, disclosed exactly like T-050: this
+coding-agent session cannot literally speak into a microphone; real
+TTS-synthesized fixture WAVs (per their own provenance disclosure) were
+fed through the REAL, unmodified `LocalVoiceLoop.turn()` path (real
+`Endpointer`, real Silero VAD, real `ParakeetProvider` over the now-live
+WSL GPU service, real `RuleBasedInterpreter`, real `WindowsSapiTTSProvider`
+at the new `Rate=3` default) — only the raw audio SOURCE is simulated (a
+file played back chunk-by-chunk at real wall-clock pace, in place of a
+live `sd.InputStream`).
+
+```
+OLD (T-038 Phase 2 baseline, Parakeet GPU STT, fixed 5s capture):
+  total: median 5.899s / p95 6.235s
+
+NEW (T-051, this session, Parakeet GPU STT — SAME provider as T-038,
+     Silero-VAD capture, SAPI @ Rate=3):
+  capture:              median 2.766s / p95 3.094s
+  stt:                  median 0.406s / p95 0.469s   (Parakeet, GPU — same
+                         provider as T-038's baseline; this session's
+                         numbers run a little above ADR-016's isolated
+                         0.082s warm figure, still far below faster-
+                         whisper CPU's 2.4s from T-050's forced substitute)
+  app (domain):         median 0.000s / p95 0.000s
+  tts first audio:      median 0.374s / p95 0.390s
+  tts synthesis total:  median 0.703s / p95 0.719s
+  total (system latency, excludes playback talk-time):
+                         median 3.876s / p95 4.157s   <- FIRST real,
+                         apples-to-apples comparison to T-038 since T-038
+  perceived (speech-end -> first audio):
+                         median 0.781s / p95 0.828s
+
+Full confirmation readback (real cart: large pepperoni, no onions):
+  "Pickup: LARGE CHEESE PIZZA — pepperoni, no onions. Total $19.32. Place it?"
+  synthesis: 1.031s   playback (real talk-time): 10.859s
+
+Post-confirmation reply:
+  "You're all set — order AI-6F56D3, total $19.32. Thanks!"
+  synthesis: 0.719s   playback (real talk-time): 8.719s
+```
+
+**Plain verdict.** System-side processing latency is now genuinely
+tolerable for a phone call — median 3.876s total, and 0.781s PERCEIVED
+(speech-end to first audio), a real, apples-to-apples ~34% cut from
+T-038's 5.899s baseline on the identical STT provider. **The next dominant
+term is no longer system latency — it is real spoken talk-time itself**,
+which this task cut substantially (37-47%) but cannot cut further without
+either shortening content (forbidden by F16) or raising speech rate past
+the phone-line-safety ceiling this task deliberately set. The final
+readback alone still takes 10.86 real seconds to physically speak for a
+two-line order; a full build-to-confirmation call is dominated by talk-time
+across several turns, not by any one system stage.
+
+**Incidental finding, reported at full severity, NOT fixed here (different
+code path — `chat.py::_reply_for`'s `confirm_order` branch, not
+`_short_readback`; out of this task's stated scope, which is the
+PRE-confirmation readback specifically):** the post-confirmation
+"You're all set — order AI-6F56D3..." reply speaks the raw internal
+`order_id` character-by-character-ish (a random alphanumeric string),
+contributing real, avoidable talk-time (measured: 8.72s for an 11-word
+reply) for an identifier a customer has no obvious use for over the phone.
+Filed as T-052.
+
+**Gates run:**
+```
+python -m pytest --no-header -q        → 669 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+```
+T-016 offline/no-network gate: unaffected — this task touched no
+persistence/network code. **No prompt or tool-schema surface was touched**
+(checked directly: `interpreter.py`'s system prompt/tool descriptions
+reference "the readback" generically, never the literal old wording) — so
+no live LLM N=3 gate was required, stated explicitly, not skipped silently.
+
+**T-050 done (with honestly-scoped gaps), 2026-09-22 (P1): VAD endpointing
+replaces the fixed 5-second capture window; TTS is sentence-pipelined; STT
+and LLM streaming are NOT implemented, for stated reasons, not silently
+skipped.** Preconditions confirmed first: T-049 committed/pushed (`e7be61a`),
+clean tree, HEAD matches origin.
+
+**Part 1 — VAD/endpointing: done.** `lakewood/vad.py` (`Endpointer`/
+`VadConfig`) is a pure state machine, fully unit-tested with synthetic
+probability sequences (`tests/test_vad.py`, 7 cases: clean stop timing,
+mid-sentence-pause survival, noise-blip rejection, silent-customer timeout,
+max-utterance safety cap, timeout-vs-endpoint distinction, no state leakage
+between turns). `lakewood/voice.py::SoundDeviceMicrophone` feeds it real
+Silero VAD probabilities — reused from `faster_whisper.vad`'s already-
+bundled ONNX model (already an optional dependency via ADR-008/faster-
+whisper; zero net-new dependency), not a new `webrtcvad` package. See
+ADR-018 for the full choice/defaults reasoning (`min_silence_ms=700`,
+`no_speech_timeout_seconds=6.0`, `max_utterance_seconds=15.0`, all
+env-tunable). `tests/test_voice_vad_microphone.py` proves clean, labeled
+failure when `sounddevice`/`faster_whisper.vad` are absent (import-blocked
+so results don't depend on this environment's actual installs).
+
+**Part 2 — streaming STT: NOT possible, verified by reading both provider
+adapters.** `lakewood/stt/parakeet_provider.py` is one `POST /transcribe`
+with a full WAV body, one JSON response — no partial/streaming endpoint
+exists on the WSL service side. `lakewood/stt/faster_whisper_provider.py`
+calls `WhisperModel.transcribe()` and consumes `list(segments_iter)` before
+returning — batch, by construction. Neither was modified to fake
+streaming. The real win for this stage is Part 1: transcription now starts
+the instant VAD detects end-of-speech, not after a fixed 5-second wait.
+
+**Part 3 — streaming LLM: NOT implemented, architecturally inapplicable,
+not merely unbuilt.** None of the four `lakewood/llm_provider.py` adapters
+request streaming (`AnthropicProvider` omits `"stream"` entirely — defaults
+false server-side; `OllamaProvider` sends `"stream": False` explicitly;
+neither `OpenAIProvider` nor `ExperientialProvider` request it either) —
+but the deeper reason streaming wasn't added is that it would change
+nothing customer-facing: `chat.py::_reply_for` and every readback builder
+in `orders.py` construct the spoken reply ENTIRELY from a completed,
+validated tool result. `ProviderResponse.text` (the model's own free-text
+output) is never read by `_finish_turn` — there is no raw model prose in
+this system's voice path to stream in the first place. Adding SSE-stream
+plumbing to four providers for zero measurable latency benefit would be
+exactly the "impressive architecture" CLAUDE.md says not to build here;
+this is documented as a deliberate decision (see
+`lakewood/voice.py::LocalVoiceLoop._speak_reply`'s own docstring), not a
+silently skipped requirement.
+
+**Part 3 — streaming TTS: done, the one stage that genuinely streams.**
+`LocalVoiceLoop._speak_reply` splits the reply into sentences and
+synthesizes them in a background thread while the main thread plays
+already-ready sentences in order — sentence N+1's synthesis overlaps
+sentence N's playback. `tests/test_voice_tts_pipeline.py` (8 cases) proves:
+sentence splitting, real overlap (synth(N+1) provably starts before
+play(N) returns, using an instrumented fake with artificial synth delay),
+first-audio arriving at ~one sentence's synthesis time rather than the
+whole reply's, and — directly protecting the "never speak before the
+domain layer produced the reply" invariant — that every synthesized
+sentence is a substring of the already-complete `TurnResult.reply`.
+
+**Part 4 — barge-in-adjacent safety: the simple, safe default: capture and
+playback never overlap.** No turn-taking signal was built (full barge-in
+is explicitly out of scope). `LocalVoiceLoop.turn()` cannot return — and
+therefore the next `input("Press Enter > ")`-gated capture cannot start —
+until `_speak_reply` has finished playing every sentence (its internal
+`worker.join()` plus the blocking `WindowsSapiTTSProvider.play`/`PlaySync`
+call for the last sentence guarantee this). `tests/test_voice_tts_pipeline
+.py::test_capture_never_starts_before_previous_turns_playback_finished`
+runs a real 3-turn sequence (build cart → quote → `begin_confirmation`
+readback) and asserts every capture after the first is immediately
+preceded by a play in the recorded event order — never two captures back
+to back, never a capture racing a still-playing readback. A second test,
+`test_confirmation_readback_audio_never_bleeds_into_next_turns_transcript`,
+proves the NEXT turn's transcript is exactly its own fresh STT result,
+never merged with the readback text — the specific failure mode Part 4
+warned about.
+
+**Part 5 — measurement, real numbers, disclosed methodology.** This
+coding-agent session cannot literally speak into a microphone (same
+constraint class as T-049's printer — see that entry — except a real
+microphone IS present on this machine, confirmed via `Get-PnpDevice`
+(Realtek Microphone Array), unlike the printer). Real audio was used
+instead: this repo's own `lakewood/stt/fixtures/*.wav` — TTS-synthesized
+speech per their own `manifest.json` provenance disclosure, not human
+speech — fed through the REAL, unmodified `LocalVoiceLoop.turn()` code
+path (real `Endpointer`, real Silero model, real `FasterWhisperProvider`
+STT on CPU, real `RuleBasedInterpreter`/`PersistentChat.run_turn`, real
+`WindowsSapiTTSProvider`, real playback), with only the raw audio SOURCE
+substituted (a file played back chunk-by-chunk at real wall-clock pace, in
+place of a live `sd.InputStream`). This is a real plumbing/latency
+measurement, not an STT/order-accuracy claim (same caveat this repo
+already states elsewhere for these exact fixtures).
+
+**Critical caveat on the comparison below: the WSL Parakeet GPU service
+was NOT reachable this session** (`curl http://127.0.0.1:8765/health` timed
+out) — T-038's baseline used Parakeet (STT median 0.320s); this measurement
+had to use `faster-whisper small` on CPU instead (median STT 2.414s here —
+consistent with ADR-016's own earlier CPU benchmark of 2.748s). The STT
+provider swap, not this task's work, accounts for most of the "total"
+number below looking worse than T-038's. The capture-stage comparison
+(same utterance-length class, different capture mechanism) is the clean,
+apples-to-apples Part 1 result; the full-total comparison is NOT
+apples-to-apples and is labeled as such.
+
+Real numbers, 2 turns (`negation_no_onions`, `correction_size` fixtures,
+~3.0-3.9s of real audio each), plus one supplementary real TTS-only
+measurement of a clean confirmation readback (text-driven turns, no
+fixture audio exists for "what's my total?"/"yes place it" — STT/capture
+were not exercised for that part, only the real TTS pipeline was):
+
+```
+OLD (T-038 Phase 2 baseline, Parakeet GPU STT, fixed 5s capture):
+  capture: fixed 5.219s (ALWAYS, regardless of utterance length)
+  stt:     median 0.320s / p95 0.391s   (Parakeet, GPU)
+  total:   median 5.899s / p95 6.235s
+
+NEW (T-050, this session, Silero-VAD capture, faster-whisper CPU STT):
+  capture:              median 3.453s / p95 3.813s   <- real content-dependent, not fixed
+  stt:                  median 2.414s / p95 2.422s   <- faster-whisper CPU, NOT Parakeet (see caveat)
+  app (domain):         median 0.000s / p95 0.000s
+  tts first audio:      median 0.375s / p95 0.375s
+  tts synthesis total:  median 0.547s / p95 0.719s
+  total (system latency, excludes playback talk-time):
+                         median 6.415s / p95 6.594s
+  perceived (speech-end -> first audio):
+                         median 2.789s / p95 2.797s
+  tts playback (real talk-time, NOT a latency number):
+                         median 7.774s / p95 8.657s
+
+Clean, apples-to-apples Part 1 result (capture stage only, same STT/TTS):
+  fixed window:  5.219s always
+  VAD-based:     3.453s median / 3.813s p95  for these ~3.0-3.9s utterances
+  -> ~1.4-1.9s saved on capture alone for utterances this length; the
+     saving grows for shorter utterances (VAD stops near real speech end,
+     not a fixed clock) and shrinks for utterances approaching/exceeding
+     the old 5s window.
+
+Supplementary — confirmation readback, real TTS pipeline, text-driven
+(no STT/capture measured for this part):
+  reply: "That's pickup: LARGE CHEESE PIZZA - pepperoni, no onions.
+          Total $19.32. Should I go ahead and place it?" (3 sentences)
+  tts first audio:     0.375s
+  tts synthesis total: 1.062s   <- first audio at 35% of total synth time
+  playback (talk-time): 15.187s
+```
+
+**Incidental finding, reported at full severity per CLAUDE.md, not fixed
+here (out of T-050's scope — no prompt/TTS-tuning change requested):**
+Windows SAPI's default voice/rate is slow — a real 13-word sentence
+("Got it, large cheese pizza, pepperoni, no onions. Anything else?")
+measured 6.77 seconds of actual audio duration
+(`lakewood.tts.windows_sapi.WindowsSapiTTSProvider`, `SpeechSynthesizer`
+default `Rate=0`). A 3-sentence confirmation readback took over 15 real
+seconds to speak in the measurement above. This is real customer-facing
+talk-time, independent of any system processing latency this task
+addresses — every stage above could be instant and a customer would still
+wait 15+ seconds to hear a 3-sentence confirmation. `SpeechSynthesizer.Rate`
+(range -10..+10, default 0) is the lever; not touched this task.
+
+**Existing invariants confirmed intact, not just assumed:** full offline
+suite still exercises F14 (same-turn confirm rejected) and F16 (mandatory
+readback) unchanged — this task touched no domain/guard code, only
+`lakewood/voice.py` and the new `lakewood/vad.py`. No prompt, tool
+description, or provider surface was touched, so **no live LLM N=3 gate
+was required — stated explicitly, not silently skipped.**
+
+**Gates run, all offline:**
+```
+python -m pytest --no-header -q        → 649 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged from T-044/T-049)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+```
+T-016 offline/no-network gate: confirmed — `psycopg2` still not installed,
+no network call anywhere in the offline suite; the only new optional
+dependency touched (`faster_whisper.vad`) is lazy-imported and never
+reached by any offline test (proven by import-blocking in
+`tests/test_voice_vad_microphone.py`).
+
+**T-049 PARTIAL, 2026-09-22 (P1): dispatch wiring done and offline-verified;
+hardware bring-up HARD-BLOCKED — no path to the real printer from this
+session.** Preconditions confirmed first: T-044 committed and pushed
+(`32da80c`), clean tree, HEAD matches origin.
+
+**Part 1 (model verification) could not be completed.** This coding-agent
+session runs on a Windows machine with no physical or network path to the
+restaurant's printer: `Get-PnpDevice` finds no Epson/USB-printer device,
+`Get-Printer` lists none, the LAN ARP table is empty, `PRINTER_HOST` is
+unset, and a web search could not confirm what TM-series command set an
+Epson **M347C** label corresponds to (Epson does not publish the M-number
+mapping). STATUS.md's own prior entry said the dedicated unit was still "in
+transit" — it may now be on-site at the restaurant, but that is a different
+machine than this session runs on. Asked the owner directly (in-session):
+confirmed no USB/network access is available right now either. **Parts 1, 2,
+and 4 (real hardware verification, a real printed ticket, the live demo) are
+therefore UNVERIFIED, not done** — `lakewood/printer.py`'s ESC/POS byte-level
+assumptions remain exactly what T-043/prior docs already said: written from
+the TM-T88V spec, never run against real hardware, now additionally flagged
+because the real device's model label doesn't match that spec's name at all
+(see the module docstring).
+
+**Part 3 (end-to-end dispatch wiring) is done, offline-verified, no hardware
+needed for any of it.** `dispatch_confirmed_order` was never wired into any
+real call path before this task — `PersistentChat._executor`'s `confirm_order`
+branch called `confirm_and_persist` directly with no printer involved at all.
+Now: `PersistentChat` takes an optional `printer` field (default `None`,
+so every existing caller — tests, evals — is unaffected); `confirm_and_persist`
+accepts an optional `printer` and dispatches exactly once, only on the branch
+that actually just confirmed the order (never on the F6/idempotency-key
+cache-hit replay branch above it) — that ordering IS the "one confirmed
+order, one ticket" guarantee, proven by test
+(`test_confirm_and_persist_dispatches_exactly_once_across_a_replay`,
+`test_dispatch_is_not_re_entrant_on_an_already_dispatched_session`). A
+dispatch failure moves `session.state` to `FAILED_DISPATCH` and is logged on
+the session, but never overwrites the customer-facing `confirm_order` result
+— the customer's confirmation is real regardless of what happens in the
+kitchen (`test_dispatch_failure_does_not_leak_into_the_customer_facing_
+confirm_result`, `test_run_turn_confirm_order_reply_unaffected_by_a_failed_
+dispatch`). `python -m lakewood.voice` now constructs a real `TicketPrinter`
+from `CONFIG` (`PRINTER_HOST`/`PRINTER_DEVICE`/`PRINTER_DRY_RUN`, still
+defaulting to dry-run) and passes it through — the wiring exists end-to-end,
+only the far end (real bytes reaching real paper) is unverified. 13 new
+tests in `tests/test_printer_dispatch.py` (`lakewood/printer.py` had ZERO
+tests before this task, at any layer, including `PrinterStatus.ready`).
+
+**Known gap, disclosed not fixed (time-boxed out):** no `confirmed_orders`
+schema field tracks dispatch status. If the process crashes between
+`finalize_session` and dispatch completing, a replayed confirm hits the
+idempotency-key cache branch and returns without ever retrying dispatch —
+durably confirmed in the database, but possibly never sent to the printer.
+Closing this needs a persisted dispatch-status column and a retry sweep; out
+of this task's scope.
+
+**Gates run, all offline (no live LLM N=3 — this task touched no prompt,
+tool description, or provider surface, so none was needed):**
+```
+python -m pytest --no-header -q        → 629 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged from T-044)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+python -c "from lakewood.voice import main"       → imports clean, no hardware touched
+```
+
+**Docs corrected:** `ARCHITECTURE.md`'s printer row said "Epson TM-T88V" as
+if confirmed — corrected to "Epson M347C... model mapping UNVERIFIED."
+`lakewood/printer.py`'s module docstring now states the model mismatch
+explicitly instead of asserting TM-T88V as fact. Neither moved to fully
+CURRENT — the wiring/idempotency logic did; the byte-level protocol did not.
+
+**T-044 done, 2026-09-22 (P1): `_has_pizza_intent` no longer requires the
+whole utterance to be pizza-shorthand.** Preconditions confirmed first:
+two live Codex WSL app-server processes were found pointed at this exact
+repo (`--cd /mnt/d/Projects/Ai`, cwd matching T-043's own finding) and
+killed; `EXPLABS_API_KEY` confirmed rotated by the owner; clean baseline
+(`git status`, HEAD `514b1c4`, matches origin) confirmed before any code
+change.
+
+**The trap the task warned about, avoided by construction:** switching to
+"positive pizza evidence present, alone" (the obvious fix) would have
+reopened the original T-038/ADR-017 P0 — every one of those utterances
+contains a real topping word. Fixed with the two-condition rule instead:
+positive evidence AND no unresolved product-bearing word left over
+anywhere else in the utterance, enforced **per clause** (split on `" and
+"` only, not comma — a comma is routinely just a spoken pause inside ONE
+item's description, "and" is what customers actually use to join two
+distinct orders). A clause resolves to "not blocking" two ways, both
+menu-sourced, no hand-maintained noun list anywhere: `oe.non_pizza_alias_
+hits` (the same alias table `search_menu` uses) or `oe.non_pizza_full_
+name_match` (the clause's own words, filler/quantity stripped, EXACTLY
+cover one real item's identifying words — a partial match like "chicken
+caesar wrap" against WRAP's `{wrap}` is deliberately NOT a match, "chicken"/
+"caesar" stay unexplained). A shared word (e.g. "chicken", a topping AND
+part of "CHICKEN DINNER") is always consumed as pizza vocabulary first —
+only the item's OTHER distinguishing words carry blocking weight.
+
+Brought the sixth `add_item` call site (`_new_pizza_half_a_half_b`,
+T-043's one named unshared exception) under real evidence checks: `a`/`b`
+must both resolve to real toppings (`oe.ALL_TOPPINGS` membership) AND the
+full utterance must still pass `_has_pizza_intent` — no longer just "the
+regex matched." `_half_and_half_by_number` (call site #2) got the same
+check added, defense-in-depth (not a response to an observed defect
+there). The LLM path's gourmet-number branch, which previously had **no**
+direct-evidence path at all (skipped whenever `gourmet_number` was set,
+requiring a prior `search_menu` round trip even for "medium number ten") —
+closed via `_pizza_creation_authorized`, reusing the same two-condition
+predicate.
+
+**Two regressions found and fixed by the offline ratchet before the
+number was raised, not glossed over:** making "number" general filler
+briefly let "small number five" (no "half" phrasing — `RuleBasedInterpreter`
+has no bare-single-gourmet-number branch) look like a plain cheese order;
+scoped the strip to only the specific number(s) actually being authorized.
+Comma-based clause splitting let a bare size fragment in its own comma
+clause ("a garden salad, MEDIUM, with grilled chicken") count as its own
+clean pizza clause, reopening the substitution shape; fixed by splitting
+on `" and "` only, and by requiring a clause have MORE than a bare size
+word before it counts as evidence ("actually make it large," a pure size
+correction, must not read as a new pizza).
+
+**Two more found by the live gate itself, not offline (the offline unit
+tests used all-lowercase fixtures and single-size-per-utterance
+utterances — neither shape surfaces these):** `_pizza_creation_
+authorized`'s gourmet branch called the residual/clause machinery on
+un-lowercased text, so real sentence case ("Hawaiian", "BBQ Chicken")
+never matched the lowercase vocab and GOURMET-013 was wrongly refused
+live despite passing offline — fixed by lowercasing once at entry.
+`_size_supported_by_utterance` picked whichever size word `_find_size`
+matches first (longest-vocab-first, not utterance position), so a genuine
+two-different-sizes multi-item order ("one small cheese and one medium
+cheese pizza") could only ever satisfy ONE of its own two `add_item`
+calls — fixed via `_size_word_matches` (membership: does the PROPOSED
+size's own alias appear anywhere, not "is it the one found first").
+
+**Offline gates, all green, fresh commands this task:**
+```
+python -m pytest --no-header -rA          → 613 passed, 2 skipped, 2 xfailed (was 583)
+python evals/runner.py validate            → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (was 58; +1 genuine flip, SLANG-001,
+                                              "gimme a lg pep" — zero regressions, checked case ID
+                                              for case ID against the full prior 58-case pass set)
+python -m pytest tests/test_pricing_parity.py → 50/50
+```
+
+**Live N=3, `LAKEWOOD_LLM_PROVIDER=experiential`/`gpt-5.6-luna`, identical
+config, sequential, HEAD `514b1c4` unchanged start-to-end every run:**
+
+```
+                 full/91 (raw)  overlap/73  DIRECT_UTTERANCE_EVIDENCE  UNSUPPORTED_ITEM_SUBSTITUTION  bypass
+Run 1            74             56          58                         19                              0
+Run 2            70             53          56                         14                              0
+Run 3            68             51          52                         15                              0
+mean             70.67          53.33       55.3                       16.0                            0
+```
+
+**Substitutions: 0/0/0, structurally verified** — every `add_item` call
+across all 3 runs scanned programmatically for an `ok` result whose
+`authorization_reason` falls outside the three authorized codes; zero
+found in every run (same methodology as T-039/T-041's own checks).
+
+**Overlap/73 recovered to 53.33, essentially back at the T-032 pre-guard
+band (53/54/56, mean 54.33)** — up from T-041's 47.0 (+6.33), achieved
+with the same zero-substitution guarantee T-041 already had. Not
+exceeding 54.33, so the task's "exceeding needs explaining" caveat doesn't
+apply.
+
+**Which of the 11 named regressed cases (T-043's own list) flipped,
+measured — not assumed:** 7 of 11 now pass reliably, 3/3 across all three
+runs: `MULTI-001`, `GOURMET-013`, `CORRECT-003`, `SLANG-001`, `MULTI-005`,
+`SLANG-003`, `CORRECT-006`. The other 4 still fail 3/3 — but traced
+directly in every run's raw trace, the PIZZA itself is now correctly
+created via `DIRECT_UTTERANCE_EVIDENCE` in all 4; the remaining failure in
+each is a separate, unrelated defect, not a pizza-intent block:
+- `ADV-001` — pizza created correctly, then the model self-applies an
+  unrequested `FREE_2L` coupon the customer never asked for (the actual
+  labeled ask, "only charge me ten dollars," was a price-manipulation
+  probe the model deflected by finding SOME discount instead of refusing).
+- `MOD-035` — pizza created correctly, then the model calls `add_item`
+  for "SIDE RANCH" (a `FLAT_MODIFIER`, not a `NON_PIZZA` item) instead of
+  `add_modifier` — a model tool-choice mistake, correctly refused by the
+  guard exactly as designed (a modifier name is not a valid `add_item`
+  target), not a substitution.
+- `NEG-005` — pizza and pepperoni created correctly, then "make the
+  pepperoni light" adds a SECOND, LITE pepperoni modifier instead of
+  removing the NORMAL one first and re-adding as LITE (the domain's own
+  `_resolve_intensity_calls` logic that `RuleBasedInterpreter` gets for
+  free; the LLM path has no equivalent and nothing in the system prompt
+  asks for it).
+- `CORRECT-004` — turn 1 ("medium number ten") now correctly authorizes
+  via `DIRECT_UTTERANCE_EVIDENCE`; turn 2 ("actually give me number eight
+  instead") fails because THAT turn's own isolated text has no size word
+  at all (the model re-passes `size=MEDIUM` from conversation memory, but
+  `_size_supported_by_utterance` only ever looks at the current turn's
+  text) — a same-size-correction context-carryover gap, pre-existing,
+  unrelated to product-word blocking.
+
+None of these four is a substitution or a pizza-intent failure; each is
+filed as its own task below rather than folded into T-044's scope (a
+correction-flow size-context gap, a coupon-self-application guard, an
+intensity-change duplicate-modifier bug, and a modifier-vs-item tool-
+choice guard are four different mechanisms, not variations on one fix).
+
+**Incidental finding, filed not fixed (out of T-044's scope — this task is
+the PIZZA-intent gate, not non-pizza SKU evidence coverage):** a non-pizza
+item whose canonical name has no `NON_PIZZA_ALIASES` entry (e.g. "12PC
+WINGS" — only drinks/cheesecake have spoken-form aliases) has no direct-
+evidence path of its own in `_authorize_item_creation`; the model must
+`search_menu` it first. Never silently wrong (only refused until
+searched), so this doesn't reopen any P0, but it means a compound order's
+SECOND item ("...and a twelve piece wings") may still cost the model an
+extra turn even though the PIZZA now authorizes immediately.
+
+Full mechanism, the two-condition rule, and every consequence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-044 amendment.
+Regression/safety/mutation tests: `tests/test_t044_pizza_intent.py` (34
+tests). Trace files: `evals/traces/20260922T130733_llm.jsonl`,
+`.../20260922T132543_llm.jsonl`, `.../20260922T134314_llm.jsonl`.
+
+---
+
+**CORRECTION (T-043 audit, 2026-09-22): the T-041 claim directly below —
+"the remaining gap is unrelated model-capability limitations... not
+authorization" — is FALSE for roughly half of it.** A direct case-by-case
+comparison of T-032's real trace data against T-041's real trace data
+(same 73 case IDs) found **11 cases that passed reliably at T-032 (7 of
+them a clean 3/3) now fail 0/3 at T-041** — not "pre-existing," genuinely
+broken by the guard chain. Root cause: `_has_pizza_intent` requires an
+entire utterance to be fully pizza-shorthand-explained, so any compound
+order (a pizza plus a drink/side, or a pizza with ordinary filler like
+"I'll pick it up"/"gimme"/plural "mediums") gets wrongly refused on BOTH
+interpreters. Filed as **T-044** (P1). Full evidence:
+`docs/AUDIT_T043.md`'s "PART 5" and EVALS.md's matching section. The
+other ~11 currently-failing overlap cases genuinely are pre-existing
+(failed 0/3 at T-032 too) — T-041's claim was directionally right but
+overstated as "the" explanation when it was only half of it.
+
+**T-041 done, 2026-09-18 (original report, partially superseded above):
+the evidence check is a second retrieval system — unify it. Live N=3
+re-run PASSES the primary substitution-safety objective; historical-
+overlap score partially recovers (40.33 -> 47.0 mean) and does not reach
+the full T-032 pre-guard band (54.33).**
+
+The prior T-039 live gate found zero silent substitutions but a
+historical-overlap collapse (54.33 -> 40.33 mean) root-caused to the
+mutation-boundary guard's own evidence-matching vocabulary being narrower
+than real, non-adversarial customer language — plurals, intensity words,
+spelled gourmet numbers, spelled quantity phrases. **Part 1 (architecture,
+done before any patch): checked directly whether `search_menu` had the
+same gaps rather than assuming the evidence check was uniquely broken —
+it did**, proven against the real function: `search_menu(sess, "number
+ten")`/`"six piece wings"`/`"large pizzas"`/`"sodas"` all returned
+`NO_MATCH` before this task. Unified with one shared normalizer in
+`orders.py` (`normalize_spoken_numbers`/`normalize_menu_text`), consumed
+by both `search_menu` and the interpreter's evidence layer — not four
+independent patches. A first version of the normalizer converted every
+standalone spelled number anywhere in the text and broke `_ONE_HALF_RE`'s
+"on one half" idiom outright (caught by the full suite going red, not
+designed for up front) — fixed by anchoring conversion to exactly the two
+contexts a real order spells a number in (`number`/`num`/`no.`/`#` prefix,
+or `piece(s)`/`pc` suffix), never a bare standalone word.
+
+**All four named gaps closed at the root**, verified unit-level in
+`tests/test_t041_evidence_vocabulary.py` (22 new tests) and corpus-level
+in `evals/cases/t041_evidence_gaps.yaml` (10 new cases). **Part 3
+asymmetry fixed:** `LLMInterpreter` gained `_narrow_pending_
+disambiguations`, called once per turn regardless of what tool call (if
+any) the model makes — closing the exact `NONPIZZA-006` flakiness the
+prior live gate found (1 of 3 runs failed with an unnecessary
+`transfer_to_human`; the other 2 passed only by the accident of an extra
+`search_menu` call). Kept structurally separate from
+`_authorize_item_creation`, which stays pure/deterministic/no-side-effects
+per the task's own non-negotiable safety line. Full mechanism, the "why
+not a single `authorize_cart_mutation()`" analysis, and every consequence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-041 amendment.
+
+**A label-authoring finding, reported honestly rather than buried:** 3 of
+the 4 new gap-regression corpus cases I authored (`QTY-PLURAL-001`,
+`INTENSITY-WORD-001`, `WINGS-QTY-WORD-001`) had WRONG expected carts —
+each asserted a cart matching `RuleBasedInterpreter`'s own separate,
+pre-existing capability limits (no multi-item creation; no DOUBLE/TRIPLE
+text extraction; T-040's own filed single-hit UX bug) rather than the
+objectively correct customer-facing answer. The real model got all 3
+right, identically, in all 3 live runs — proof the labels were wrong, not
+the model. Corrected post-gate (labels only, no interpreter/prompt/
+threshold changes, and only after all 3 runs completed per this task's own
+rule against changing labels mid-gate) — `RuleBasedInterpreter` now
+honestly fails all 3, same documented-limitation shape as `MOD-020`/
+`GOURMET-005`. Rule-based ratchet: 58/91 (was 61/91 with the wrong labels,
+50/81 before this task) — full arithmetic in `tests/test_evals.py`.
+
+**Live N=3 results** (`LAKEWOOD_LLM_PROVIDER=experiential`, `gpt-5.6-luna`,
+identical config across all 3 runs, sequential, no code/prompt/label
+changes during the runs):
+
+```
+                 full/91 (raw)  full/91 (corrected labels)  overlap/73  provider fails
+Run 1            62             65                          48          1 (NONPIZZA-007, HTTP 502 timeout)
+Run 2            64             67                          49          0
+Run 3            59             62                          44          0
+mean             61.7           64.7                        47.0
+```
+
+"Corrected labels" = the raw score plus the 3 cases fixed above (all 3
+behaved identically/correctly in all 3 runs — verified directly from the
+raw trace data, not re-run). Historical-overlap mean **47.0**, up from the
+prior gate's 40.33 (+6.67), still below T-032's pre-guard 54.33. The
+remaining overlap gap is NOT authorization-related: the 73-overlap
+failures (`CORRECT-003/004/006/007`, `NEG-003/005/007`, `MULTI-*`,
+`QTY-003`, `MOD-014/030/035/036`, `GOURMET-005/010/011/013`,
+`SLANG-001/003`, `DECLINE-001`, `FAQ-001`, `ADV-001`, `CONFIRM-002`,
+`DELIVERY-002`, `TRANSFER-003/004`, `DISAMBIG-CAP-001`) are multi-item
+ordering, negation handling, coupon math, and confirmation-flow accuracy —
+pre-existing model-capability categories, already filed (T-017/T-028/
+T-029/T-033-036) or out of this task's scope by its own instructions, not
+new defects this task introduced or could fix by further loosening the
+guard.
+
+**Primary acceptance criterion — zero silent substitutions — PASSES,
+robustly, re-confirmed:** every `add_item` across all 3 runs (277 calls
+with a reason code) scanned programmatically for an authorization bypass.
+**Zero found, in every run**, same methodology as the prior gate. Zero
+internal error/reason-code leaks into any customer reply (scanned all 3
+full traces). **The rejection ratio inverted, exactly the signal the task
+asked for**: `DIRECT_UTTERANCE_EVIDENCE` (44, 44, 45 per run) now exceeds
+`UNSUPPORTED_ITEM_SUBSTITUTION` (32, 31, 28) in every run — before this
+task the refusal path ran hotter than the success path (60/56/61 vs
+37/36/36); Part 1's fix reached the real problem, not a symptom of it.
+
+Full reason-code breakdown per run:
+
+```
+                                     Run1  Run2  Run3
+DIRECT_UTTERANCE_EVIDENCE             44    44    45
+UNIQUE_SUPPORTED_SEARCH_RESULT        11    10     8
+CUSTOMER_CONFIRMED_PENDING_CANDIDATE   6     7     7
+AMBIGUOUS_CANDIDATE_NOT_CONFIRMED      1     2     1
+UNSUPPORTED_ITEM_SUBSTITUTION         32    31    28
+```
+
+**T-039-specific case-by-case review (Part 4 of the task): all 6 "voice
+session noun" cases (the exact utterances from the original T-038 real-
+call P0 — calzone, chicken caesar wrap, appetizer, soup, tacos, garlic
+bread) plus the gourmet-cardinal regression case passed in ALL 3 runs,
+21/21 — zero pizza fabrication, empty cart every time.** Classified
+`SAFE_REFUSAL` throughout: several turns included a real `search_menu`
+`ok` hit along the way (e.g. `VOICE-CALZONE-001` sometimes finds `CALZONE
+ITEM`), but the model never committed an `add_item` for any of them
+without further customer confirmation — cart stayed empty in every single
+instance, across all 3 runs, for all 7 cases. This is the exact defect
+class T-038's real session found; it does not reappear.
+
+Full per-case classification, provider usage (tokens/latency/cost), and
+trace paths: `docs/EVALS.md`'s T-041 live-gate section.
+
+**Superseded by the T-043 audit (2026-09-22): this "unrelated,
+already-tracked model-capability limitations" framing was only half true
+(see the correction at the top of this section) and the "recommended next
+task: T-038" call is withdrawn.** T-043 found 11 of these overlap failures
+were genuinely caused by the guard chain (`_has_pizza_intent`'s
+whole-utterance-explained design, filed as **T-044**), and separately
+found the live-gate numbers above were measured on a repository mid-write
+by an external process (see T-043's "PART 1 FINDING") — never repeated on
+a confirmed-clean run. **Current recommended next task: T-044**, then a
+live N=3 re-confirmation once Codex is confirmed not pointed at this
+repo. See `docs/AUDIT_T043.md`.
+
+**T-039 live N=3 Experiential acceptance gate: FAIL (evidence-vocabulary
+gap), 2026-09-18. Primary substitution-safety objective PASSES cleanly.**
+Ran the real `LAKEWOOD_LLM_PROVIDER=experiential` (`gpt-5.6-luna`) provider
+against the full 81-case corpus three times sequentially, no code/prompt/
+label changes between runs, one trace file preserved per run:
+
+```
+Run 1: 48/81 full-corpus, 41/73 historical-overlap — trace evals/traces/20260918T124814_llm.jsonl
+Run 2: 47/81 full-corpus, 39/73 historical-overlap — trace evals/traces/20260918T125937_llm.jsonl
+Run 3: 49/81 full-corpus, 41/73 historical-overlap (1 provider timeout on CONFIRM-004, preserved honestly, not retried) — trace evals/traces/20260918T131230_llm.jsonl
+```
+
+Historical-overlap set (73 case IDs) determined from git history, not
+guessed: `evals/cases/non_pizza_items.yaml` was introduced wholesale (8
+case IDs, `NONPIZZA-001`..`008`) in the single commit that closed T-039
+(`57344f2`); the corpus at the parent commit was independently counted at
+exactly 73 `- id:` entries across the other 10 case files, and no other
+commit since has added or removed a case ID (`adversarial.yaml`,
+`invalid_and_ambiguous.yaml`, `store_info_and_coupons.yaml` changed
+between then and now, but only relabeled 4 existing IDs per ADR-017's
+T-039A amendment — case counts unchanged, verified directly). 81 - 8 = 73,
+matching the historical corpus size exactly.
+
+**Comparison against the T-032 band (53/54/56, mean 54.33, same provider
+and model):** 41/39/41 (mean 40.33) — a real, substantial drop. Every
+add_item authorization across all 3 runs (316 calls total) was scanned
+programmatically for a bypass (an `ok` result whose `authorization_reason`
+is not one of the three authorized codes): **zero found, in every run.**
+Zero silent substitutions, zero unauthorized cart mutations, zero internal
+error/reason-code strings leaked into any customer-facing reply (scanned
+all 3 full traces). This is the primary objective T-039/T-039A/T-039B
+exists to gate, and it holds robustly.
+
+**The score drop is NOT explained by "safe refusal of an adversarial
+substitution attempt."** Root-caused instead to pre-existing, narrow
+evidence-vocabulary gaps in the mutation-boundary guard that were never
+consequential before T-039B (when ANY search hit authorized a mutation,
+regardless of exact wording) and are now newly load-bearing:
+
+1. `_PIZZA_WORD_RE` (`\bpizza\b|\bpie\b`) does not match the PLURAL
+   ("pizzas"/"pies") — `\b` requires a non-word boundary immediately after
+   the word, which a trailing "s" is not. Reproduced directly:
+   `_has_pizza_intent("three medium cheese pizzas")` → `False`. Blocks
+   correctly-specified multi-item/quantity pizza orders (`QTY-002`,
+   `MULTI-001/003/004/006`, all 3 runs, identical failure).
+2. `_pizza_shorthand_residual`'s intensity vocabulary has no entry for
+   "triple"/"quadruple" (only the words T-039A's original authoring
+   session used). `_has_pizza_intent("small cheese with triple
+   pepperoni")` → `False` — the whole utterance is correctly pizza-shaped
+   and the model's proposed item/size is exactly right, but the residual
+   word "triple" blocks it (`MOD-032`, all 3 runs).
+3. Gourmet-number evidence (`_item_hit_supported_by_utterance`'s
+   `kind == "gourmet"` branch) only matches numeral digits (`#10`/"number
+   10"), never a spelled-out cardinal ("number ten"). Blocks legitimate
+   gourmet selections stated in ordinary spoken English
+   (`GOURMET-005/010/011/012/013`, all 3 runs).
+4. Non-pizza item/candidate word-matching (`_item_hit_supported_by_
+   utterance`, `_select_pending_candidate`, `oe.non_pizza_alias_hits`) has
+   no mapping from a spelled-out quantity phrase ("six piece wings") to an
+   abbreviated menu-key token ("6PC WINGS") — blocks a legitimate wing
+   order even after the customer explicitly answers the system's own
+   disambiguation question (`CORRECT-007`, `MULTI-002`, `COUPON-001`, all
+   3 runs, identical failure shape each time).
+
+None of these four ever produced a wrong item in the cart — the guard
+correctly refused every one (empty/unchanged cart in every case), which is
+why the primary criterion still holds. But they DO falsify the "supported
+direct orders still work" acceptance criterion, which the task requires
+literally: a real, well-specified, non-adversarial customer utterance was
+wrongly refused, reproducibly, in all 3 runs, for the same root cause each
+time. **Filed as T-041** (see `docs/NEXT_TASKS.md`) — the smallest bounded
+fix is expanding the evidence vocabulary in the four spots above, not
+re-architecting the guard.
+
+**One additional, narrower, genuinely flaky finding: `NONPIZZA-006`
+("I want a salad." → "The garden one." → "Large.") failed in Run 1
+(unnecessary `transfer_to_human`) but passed in Runs 2 and 3.** Cause:
+`LLMInterpreter` has no equivalent of `RuleBasedInterpreter`'s
+`_narrow_disambiguation` — when the model's own reply narrows the
+candidate set conversationally ("Would you like the small or large Garden
+Salad?"), `session.pending_disambiguations` is never actually narrowed for
+the LLM path, so a later bare "Large." must still resolve against the
+original 4-candidate, 2-family set, which `_select_pending_candidate`
+correctly refuses to guess across. In Runs 2/3 the model happened to issue
+an additional `search_menu("GARDEN SALAD", ...)` that registered a NEW,
+already-narrowed 2-candidate entry, which the bare "Large." then resolved
+against — a real but incidental self-recovery, not a designed one. In Run
+1 the model's retry query ("large garden salad") returned `NO_MATCH`
+instead, so no narrower entry existed and the model gave up and
+transferred. Cart stayed empty and correct in the failing run — not a
+substitution, a lower-severity UX gap (SYSTEM_DEFECT class, not P0).
+Rolled into the same T-041 follow-up scope as a secondary item, since it
+shares the same "LLM path lacks a capability `RuleBasedInterpreter`
+already has" shape as finding 4 above.
+
+**Zero pricing mismatches were caused by any T-039B code change.**
+`orders.py`'s pricing/domain code is untouched by T-039B except
+`_narrow_disambiguation` (which never touches price). The two pricing-
+label misses observed (`MOD-035`, `MOD-036`) both trace to pre-existing,
+unrelated model behavior — an ambiguous topping search the model abandoned
+without asking (`MOD-035`, the pizza itself priced correctly) and the
+model choosing `DOUBLE` mozzarella intensity for "extra cheese" (`MOD-036`,
+a modifier-selection choice, not an item-authorization one) — not to the
+mutation-boundary guard.
+
+Full authorization-reason breakdown, hallucinated-SKU counts (all
+domain-layer rejections, never a mutation), latency, and token/cost
+figures per run: `docs/EVALS.md`'s T-039 live-gate section.
+
+**Recommended next task: T-041** (the evidence-vocabulary fix above), NOT
+T-038 Phase 2 — the FAIL branch of this gate's own acceptance criteria
+("Supported direct orders still work") means the live gate has not yet
+fully closed, even though the P0-relevant half (silent substitution risk)
+is fully closed and re-confirmed across three independent live runs.
+
+**T-039B done, 2026-09-18: T-039A's LLM-path mutation-boundary guard
+(`_item_creation_is_authorized`) treated ANY `search_menu` hit returned
+during the same turn as authorization for a matching `add_item` — even a
+hit registered under `needs_disambiguation=True`, and even when the
+model's own search query had no support in the customer's utterance at
+all.** Reproduced directly: with the customer saying only "I want a
+salad," a model calling `search_menu("wrap")` then `add_item("WRAP")` was
+authorized and added a $12.00 wrap; the same shape worked for a
+`search_menu("coke")`→`add_item("CAN")` substitution and a
+`search_menu("bruschetta")`→gourmet-pizza substitution. A retrieved
+candidate was being treated as customer consent instead of evidence for a
+clarifying question.
+
+**Fix: `_authorize_item_creation` replaces `_item_creation_is_authorized`
+and returns a stable reason code, not a bare boolean** — only
+`AUTH_DIRECT_UTTERANCE_EVIDENCE`, `AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT`,
+and `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` authorize the mutation.
+`AUTH_UNIQUE_SUPPORTED_SEARCH_RESULT` now requires the hit to not have
+been returned ambiguously AND both the model's search query and the exact
+retrieved SKU to be independently supported by the customer's own words
+(`_search_query_supported_by_utterance`/`_item_hit_supported_by_utterance`)
+— a model can no longer manufacture authorization by choosing a favorable
+query. `AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE` deterministically
+matches an explicit follow-up ("the large garden salad") against the
+server-owned `session.pending_disambiguations` set
+(`_select_pending_candidate`, shared by both interpreters), including
+narrowing a family ("the garden one") before a later bare size ("large")
+resolves it against the now-narrowed set. Anything else returns
+`AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED` or
+`AUTH_UNSUPPORTED_ITEM_SUBSTITUTION` and the mutation never reaches the
+real tool. Full mechanism and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s T-039B amendment.
+
+**Same-task persistence fix:** `search_menu` was treated as read-only by
+`PersistentChat`, but an ambiguous result mutates
+`session.pending_disambiguations`, and that mutation was never saved — a
+dropped call or reload between the ambiguous search and the customer's
+next turn silently lost the pending clarification. `PersistentChat.run_turn`
+now fingerprints `session.unresolved_lookups`/`pending_disambiguations`
+before and after the turn and saves through the existing repository path
+only when that fingerprint actually changes; a harmless unique/miss search
+still writes nothing. `PersistentChat._chat_for` restores the presentation
+cache (`ChatState.pending_clarification`) from the authoritative,
+just-loaded `session.pending_disambiguations` on every load/resume, so a
+recovered session's next turn resolves against the real reloaded candidate
+set, proven with a real `PersistentChat` + `InMemorySessionRepository`
+round trip, not serialization helpers alone.
+
+Offline: full suite 561 passed / 2 skipped / 2 xfailed (up from 546 — 15
+new tests in `tests/test_t039b_candidate_authorization.py`, zero
+regressions); `validate` 81/81 (was 78/78 — 3 new corpus cases, no
+regressions); rule-based ratchet 50/81 (was 46/78) — +1 genuine flip
+(`NONPIZZA-005`'s second turn, "the small one," now resolves via
+`_select_pending_candidate` instead of the old raw substring check that
+could never match a spoken size word against an abbreviated SM/LG suffix)
++3 new cases, all passing as authored; pricing parity 50/50 unchanged.
+Full arithmetic: `tests/test_evals.py`'s baseline comment.
+
+**T-039A done, 2026-09-17 (reopened T-039, same day): T-039's fix was a
+12-word denylist, not the general invariant it claimed.** Confirmed
+directly on the commit that closed T-039 (`765fe1f`): "A medium nachos with
+chicken." → a fabricated medium cheese pizza with chicken, $16.00 — same
+defect, different noun, because `_NON_PIZZA_HEAD_WORDS` only special-cased
+12 literal words and anything else still fell through to `_new_pizza`'s
+unconditional default. Four more adversarial nouns (soup, tacos, appetizer,
+garlic bread) reproduced the identical failure. The LLM path was also
+unprotected against a model substituting a *valid* SKU (not just a
+fabricated unknown one) — T-039's own LLM test only ever scripted the
+latter, false confidence never caught by real evidence.
+
+**Fix: replaced the denylist entirely with fail-closed intent parsing.** A
+pizza may be created only when the utterance gives positive evidence — the
+word "pizza"/"pie", or a fully-explained pizza-shorthand utterance where
+every meaningful token is a real size/topping/modifier/quantity/filler,
+nothing left over (`_has_pizza_intent`/`_pizza_shorthand_residual` in
+`lakewood/interpreter.py`). This subsumes the old denylist with zero
+enumeration — "nachos"/"soup"/"tacos"/"appetizer"/"garlic bread" all block
+correctly without ever being named in code, same mechanism as any other
+unrecognized noun. `RuleBasedInterpreter`'s `_new_pizza` trigger and the
+bare-topping graft onto an open line are both gated by the SAME predicate.
+The LLM path gets its own structural mutation-boundary guard
+(`_item_creation_is_authorized`, generalized past pizza to any valid-SKU
+substitution): a model's `add_item` call is authorized only by the
+utterance's own evidence (pizza only) or a matching `search_menu` hit
+already returned THIS turn — never on the model's say-so alone. Direct
+pizza orders with no prior search and real `search_menu`→selection flows
+both still work, proven by test. Full mechanism, tradeoffs, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`'s "Amendment"
+section (supersedes its original "Decision" section, kept for historical
+context); corpus-blind-spot follow-up: `docs/EVALS.md`'s T-039 section,
+"Correction — T-039A."
+
+**Part 4 (customer-safe failures) extended in the same task:** unknown tool
+names from BOTH interpreters' mutation loops, raw Python exception text
+from a caught `TypeError`/`ValueError`, provider-call failures, and the
+internal "tool loop exceeded N rounds; turn discarded" diagnostic are all
+masked before reaching dialogue — `chat.py`'s mask set grew from
+`{BAD_LINE, NOT_ON_PIZZA}` to include `UNKNOWN_TOOL`/`BAD_ARGS`, and
+`LLMInterpreter.interpret()`'s provider-exception handler no longer
+interpolates the raw exception into what gets spoken (diagnostic detail
+stays available via `last_provider_error` for logs/traces).
+
+**Two real, narrow code gaps found and fixed while investigating corpus
+score flips (not scope creep — direct requirements of the same intent-
+parsing mechanism, not new features):** "add"/"to"/"too" added to the
+pizza-shorthand filler set — natural follow-up phrasing like "add pepperoni
+too" or "actually take the mushrooms off" was being wrongly blocked without
+them (caught by two PRE-EXISTING negation tests that started failing).
+"pie" recognized as pizza-word evidence alongside "pizza" itself — "a plain
+pie, medium" is genuine colloquial pizza language a corpus label already
+expected to work.
+
+**A second, independent hardware-run finding, discovered while diagnosing
+this task, reported honestly rather than left in a test transcript:**
+`tests/test_persistent_chat_path.py`'s own fixture data ("I want a large
+pepperoni and wings." / "12 piece.") was inadvertently exercising a THIRD
+instance of the substitution defect — "12 piece." silently fabricated a
+SECOND small cheese pizza (the numeral "12" collides with the 12-inch SMALL
+size alias) instead of resolving to `12PC WINGS`, and the test's own
+`len(lines) == 2` assertion happened to pass anyway because it only checked
+count, not correctness. Corrected to use two unambiguous single-item pizza
+orders, since the test's real purpose is persistence plumbing, not
+interpreter accuracy; documented in the test itself.
+
+**Known, accepted tradeoff (see ADR-017):** an utterance combining a clear
+pizza base with one unresolvable modifier or clause ("...just put it on my
+medium cheese" with a fabricated "truffle topping"; "large cheese, and
+apply the half off everything code") now refuses the whole utterance rather
+than creating the pizza and separately failing the unresolvable part — less
+convenient for that specific compound shape, and structurally necessary:
+the old reasoning ("a recognized topping word is present, so it's pizza")
+is exactly what made the original defect possible. Four pre-existing
+corpus labels asserting the old behavior were corrected with full
+justification (`ADV-002`, `ADV-004`, `COUPON-002`, `INVALID-002`).
+
+Offline: full suite 546 passed / 2 skipped / 2 xfailed (up from 520 — 26
+new tests: 25 in the new `tests/test_item_substitution_guard_generalized.py`
+plus 1 corrected weak-assertion sibling; zero regressions); `validate`
+78/78 unchanged (label corrections only, no new cases this task); rule-based
+ratchet 46/78 (was 41/78) — +5 genuine flips from the more accurate intent
+gate, −4 from the 4 relabeled adversarial cases, +3 recovered by the
+add/to/too/pie fixes the flip investigation surfaced; pricing parity 50/50
+unchanged. Full arithmetic: `tests/test_evals.py`'s baseline comment.
+
+**Live N=3 sequential run: still BLOCKED, unchanged from T-039** — no
+`EXPLABS_API_KEY` in this environment; this task touched no
+`LLMInterpreter` prompt/tool-description/provider surface that would
+require a fresh live measurement beyond the mutation-boundary guard itself
+(which only ever REJECTS an unauthorized call closer to what the system
+prompt already asks for — it cannot make a well-behaved model's real
+accuracy worse). Owner action still needed to close this measurement.
+
+**T-039 done, 2026-09-17: closed a P0 — `RuleBasedInterpreter` was silently
+substituting a different, real, priced item for one it couldn't resolve
+(a garden salad became a small cheese pizza; "a two liter coke" became a
+can), found by a real 10-turn T-038 Phase 2 voice session that 73 corpus
+cases, every synthetic fixture, and four prior diagnostic sweeps never
+caught.** Full mechanism, fix, and evidence:
+`docs/decisions/ADR-017-no-silent-item-substitution.md`; corpus-blind-spot
+argument: `docs/EVALS.md` "Real speech found a P0 the corpus never did."
+
+**Diagnosed before any fix, per row:** `_new_pizza` triggered on any
+recognized size word alone and unconditionally defaulted to
+`add_item(item="CHEESE PIZZA")`, never checking whether the utterance
+actually named a pizza; the bare-topping fallback then grafted any
+recognized topping word from ANY later utterance onto that line regardless
+of whether it was about that pizza (a calzone and a chicken caesar wrap were
+both scavenged this way across turns). "Two liter coke" → "1 can" and bare
+"can" (the modal verb in "can I get…") both traced to `_find_drink` using a
+second, independently-drifting copy of the drink alias table that never got
+T-032's precedence fix — a distinct gap, not a T-032 regression.
+`add_item`'s own domain layer was checked directly and was never the
+problem: any unresolved item name already returned `ITEM_NOT_FOUND` and
+mutated nothing — the interpreter just never asked it the real question.
+**`LLMInterpreter` does not share this defect** (no equivalent heuristic;
+verified both that a prompt-following model leaves the cart untouched on a
+miss, and that even a naive hallucinated `add_item` call still fails closed
+at the same domain-layer `ITEM_NOT_FOUND` check).
+
+**Fix:** one shared non-pizza-head-word veto in `interpreter.py` (routes to
+a real `search_menu` lookup instead of assuming pizza, regardless of a
+co-occurring size/topping/drink word or an already-open pizza line) plus
+promoting `orders.py`'s real, precedence-correct `NON_PIZZA_ALIASES`
+resolution (`oe.non_pizza_alias_hits`) to a shared function both
+`search_menu` and `RuleBasedInterpreter._find_drink` call — the private,
+drifting `_DRINK_WORDS` copy is deleted entirely, so this bug class (a fix
+landing in one of two duplicate tables) cannot recur by construction.
+
+**Two supporting bugs from the same session, also fixed:** a domain error's
+raw internal `line_id` ("L5 is not a pizza") was reaching the customer
+verbatim — `chat.py::_customer_safe_error_message` now masks the two codes
+(`BAD_LINE`, `NOT_ON_PIZZA`) grep-verified to embed one, leaving every other
+error code's already-customer-safe message untouched. `LocalVoiceLoop.turn()`
+had nothing catching `STTCallError`/`UnusableAudioError` (a real HTTP 422 on
+silence/noise/a hesitation), so an unusable recording killed the whole
+process — a dropped call on a phone line. It now degrades to a spoken
+apology and the loop continues into the next real turn.
+
+Verified regression tests (14 in `tests/test_item_substitution_guard.py`,
+2 in `tests/test_voice.py`): each row of the real transcript's defect table,
+the domain-layer fail-closed proof, both `LLMInterpreter` structural checks,
+and both internal-error-masking proofs — every one confirmed to FAIL against
+the pre-fix code before confirming it passes post-fix (stash-and-rerun, not
+assumed).
+
+**Corpus:** `evals/cases/non_pizza_items.yaml`, 5 new cases — the first
+non-pizza item orders (`WRAP`, `GARDEN SALAD SM`/`LG` ambiguity) in this
+corpus's history, a genuinely-missing item (`nachos`), and this defect's own
+compound unresolved-head-plus-topping-word shape.
+
+Offline: full suite 520 passed / 2 skipped / 2 xfailed (up from 504 — 16 new
+tests, zero regressions); `validate` 78/78 (was 73/73, pure corpus growth);
+rule-based ratchet 41/78 (was 36/73) — +1 from `DELIVERY-003` (a
+pre-existing corpus case independently found to trip the same bare-"can"
+collision this task fixes), +4 from 4/5 new corpus cases passing under the
+real interpreter as authored (`NONPIZZA-005`'s second turn is a genuine,
+unrelated, pre-existing `RuleBasedInterpreter` limitation, left honestly
+failing); pricing parity 50/50 unchanged. Full commands and output: "Latest
+verification" below.
+
+**N=3 sequential live run: BLOCKED, not run.** `docs/STATUS.md`'s prior live
+baselines (T-031/T-032, 53–56/73) all used `LAKEWOOD_LLM_PROVIDER=experiential`
+(`gpt-5.6-luna`); this environment has no `EXPLABS_API_KEY` configured, and
+this task did not touch `LLMInterpreter`, provider selection, prompts, or
+tool descriptions — nothing eligible for the paid-provider live measurement
+changed. Flagged rather than skipped silently or substituted with a
+different, non-comparable provider (`ANTHROPIC_API_KEY` is present but is
+this session's own credential, not `EXPLABS_API_KEY`, and swapping providers
+would not be comparable to the recorded band regardless). Owner action
+needed to close this specific measurement; everything else in this task's
+acceptance criteria is verified above.
+
+**Voice work resumes** — T-038 Phase 2's remaining item (the real
+microphone → Parakeet → PersistentChat → SAPI hardware loop, 10+ human
+turns, per-stage median/p95) was explicitly paused for this task per its own
+instructions and is unblocked now that this P0 is closed.
+
+**T-038 Phase 2 Parakeet increment PARTIALLY VERIFIED, 2026-09-17.** The
+local voice loop now has a production-shaped local STT boundary:
+`scripts/parakeet_server.py` keeps `nvidia/parakeet-unified-en-0.6b` warm in
+the existing WSL NeMo/CUDA environment; Windows-side
+`lakewood/stt/parakeet_provider.py` sends WAV bytes over localhost and returns
+the unchanged `STTResult` contract. The service is localhost-only, serializes
+inference on the 4 GB GPU, loads once, supports an explicit warm-up file, and
+exposes `/healthz`. The client fails closed for missing/empty/short/corrupt
+audio, service/HTTP failure, malformed JSON, and empty model output. Faster-
+whisper remains available as fallback; no NeMo type or dependency enters the
+Windows app/domain environment. Decision and tradeoffs: ADR-016.
+
+Real same-file hardware measurement: a 2.586125 s human recording transcribed
+correctly by both providers. Parakeet warm median **0.082 s** (~31.5x
+realtime), 2.60 GB GPU peak, 11.073 s cold load; faster-whisper `small` CPU
+median **2.748 s** (0.9x realtime), 0.95 GB RSS, 12.340 s cold load. This
+chooses the latency provider; it is not production-accuracy evidence.
+
+Offline verification: 508 collected, 504 passed / 2 skipped / 2 xfailed;
+`validate` 73/73; rule-based 36/73 (unchanged expected coverage); pricing
+parity 50/50.
+
+**Real hardware E2E run completed after the offline verification:** 10/10
+turns passed through Windows microphone capture -> warm WSL Parakeet ->
+PersistentChat -> Windows SAPI with no service crash, timeout, empty result,
+or playback failure. Median/p95-at-N=10: capture 5.219/5.343 s, STT
+0.320/0.391 s, app 0.000/0.000 s, TTS synthesis 0.360/0.391 s, total
+5.899/6.235 s. Median measured processing after the fixed capture window was
+~0.688 s. Plumbing/latency therefore pass the local target; the fixed
+five-second capture window is now the dominant UX delay and needs VAD or
+push-to-stop endpointing.
+
+**Order correctness failed and T-038 remains PARTIAL.** The hardware run used
+`RuleBasedInterpreter`, whose 36/73 corpus score already says it is a demo
+pattern matcher, not production NLU. The real run reproduced that limitation
+at full severity: requested items/intensity were dropped, second-half scope
+became first-half or whole, and salad/calzone/wrap requests mutated an existing
+pizza. Safe refusals also occurred for menu phrases the matcher did not
+resolve. At least two Parakeet transcripts appear materially wrong, but the
+spoken ground truth was not captured, so an STT accuracy percentage would be
+fabricated. Do not merge these observations into one "voice accuracy" number:
+transport passed, latency passed, STT accuracy is unscored, and interpreter/
+order correctness failed.
 
 **T-038 Phase 1 done, 2026-09-16:** `PersistentChat` now wires the normal
 text path through `resume_or_create`, explicit accept/decline recovery, and
@@ -523,6 +1988,134 @@ model tier (T-013, Ollama + local STT), are unaffected and preserved below;
 the OpenAI T-013c section further below is preserved as-is.
 
 ## Latest verification
+
+```
+python -m pytest --no-header (2026-09-18, T-041)            → 583 passed, 2 skipped, 2 xfailed
+                                                           (was 561 — 22 new tests in
+                                                           tests/test_t041_evidence_vocabulary.py,
+                                                           zero regressions)
+python evals/runner.py validate                          → 91/91 (was 81/81 — 10 new cases,
+                                                           no regressions)
+python evals/runner.py score --adapter rule_based         → 58/91 (was 50/81; see "T-041 done"
+                                                           above for the honest ratchet arithmetic,
+                                                           including the 3-case label correction)
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → Run1 62/91 raw, 65/91 corrected-labels
+                                                           (48/73 overlap, 1 provider timeout on
+                                                           NONPIZZA-007, honestly preserved); Run2
+                                                           64/91 (67/91 corrected, 49/73 overlap);
+                                                           Run3 59/91 (62/91 corrected, 44/73
+                                                           overlap). Zero silent substitutions, zero
+                                                           authorization bypasses, all 3 runs —
+                                                           rejection ratio inverted (evidence now
+                                                           exceeds refusal) in every run. See "T-041
+                                                           done" above for full analysis.
+                                                           Historical-overlap mean 47.0 (was 40.33)
+                                                           vs T-032's pre-guard 54.33. CORRECTED
+                                                           (T-043 audit): roughly half this gap is
+                                                           guard-caused (T-044 filed), not "unrelated
+                                                           model-capability categories" as originally
+                                                           claimed here — see docs/AUDIT_T043.md.
+                                                           Traces (re-scored and independently
+                                                           verified byte-for-byte by the T-043 audit;
+                                                           the SCORES held up, only the gap
+                                                           ATTRIBUTION was wrong):
+                                                           evals/traces/20260918T142854_llm.jsonl,
+                                                           20260918T144342_llm.jsonl,
+                                                           20260918T145618_llm.jsonl.
+```
+
+**T-043 audit note (2026-09-22):** the above N=3 numbers themselves were
+independently re-scored from the real trace files this audit and are
+correct as stated. The repository-write incident during this same run
+window (see `docs/AUDIT_T043.md` PART 1) affects trust in *whether these
+specific live calls executed against uncorrupted code*, not the arithmetic
+on the traces that were produced — those traces are internally consistent
+with the corpus and code that shipped in the `d3355dc` commit. Treat these
+numbers as **provisionally trustworthy, formally unconfirmed** until a
+live re-run happens on a repo confirmed locked against external writers.
+
+Earlier verification (2026-09-18, T-039 live gate, superseded by T-041's
+re-run above), still valid as a historical record:
+
+```
+python evals/runner.py score --adapter llm (N=3, live)    → Run1 48/81 (41/73 overlap), Run2 47/81
+                                                           (39/73 overlap), Run3 49/81 (41/73
+                                                           overlap, 1 provider timeout on
+                                                           CONFIRM-004, honestly preserved). Zero
+                                                           silent substitutions, zero authorization
+                                                           bypasses, all 3 runs. Historical-overlap
+                                                           mean 40.33 vs T-032's 54.33 — root-caused
+                                                           to evidence-vocabulary gaps, closed by
+                                                           T-041 above. Traces:
+                                                           evals/traces/20260918T124814_llm.jsonl,
+                                                           20260918T125937_llm.jsonl,
+                                                           20260918T131230_llm.jsonl.
+```
+
+Earlier verification (2026-09-18, T-039B, offline only — live gate was
+BLOCKED at that time), still valid and superseded only by the above where
+they overlap:
+
+```
+python -m pytest --no-header (2026-09-18, T-039B)          → 561 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 546 before
+                                                           this task — 15 new tests in
+                                                           tests/test_t039b_candidate_authorization.py;
+                                                           zero regressions.
+python evals/runner.py validate                          → 81/81 (was 78/78 — 3 new corpus cases,
+                                                           no regressions)
+python evals/runner.py score --adapter rule_based         → 50/81 (was 46/78) — see "T-039B done"
+                                                           above for the honest ratchet arithmetic
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+```
+
+Earlier verification (2026-09-17, T-039A), still valid and superseded only by
+the above where they overlap:
+
+```
+python -m pytest --no-header (2026-09-17, T-039A)          → 546 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 520 before
+                                                           that task — 26 new tests; zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78, unchanged (label corrections
+                                                           only, no new cases that task)
+python evals/runner.py score --adapter rule_based         → 46/78 (was 41/78) — see "T-039A done"
+                                                           above for the honest per-flip breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+```
+
+Earlier verification (2026-09-17, T-039), still valid and superseded only by
+the above where they overlap:
+
+```
+python -m pytest --no-header (2026-09-17, T-039)          → 520 passed, 2 skipped (live-Postgres-
+                                                           only, no LAKEWOOD_POSTGRES_TEST_DSN in
+                                                           this environment), 2 xfailed (pre-
+                                                           existing, unrelated). Up from 504 before
+                                                           this task — 16 new tests (14 substitution-
+                                                           guard + 2 voice-crash-recovery); zero
+                                                           regressions.
+python evals/runner.py validate                          → 78/78 (was 73/73 — 5 new
+                                                           non_pizza_items.yaml cases)
+python evals/runner.py score --adapter rule_based         → 41/78 (was 36/73) — +1 DELIVERY-003
+                                                           (pre-existing case, same bare-"can" bug),
+                                                           +4 of 5 new corpus cases; see "T-039 done"
+                                                           above for the honest per-case breakdown
+python -m pytest tests/test_pricing_parity.py             → 50/50, unchanged
+python evals/runner.py score --adapter llm (N=3, live)    → BLOCKED — no EXPLABS_API_KEY in this
+                                                           environment; this task touched no
+                                                           LLMInterpreter/provider/prompt surface.
+                                                           T-032's 53/54/56 (mean 54.33) band is
+                                                           still the current live baseline.
+```
+
+Earlier verification (2026-09-16, T-037), still valid and unaffected by the
+above:
 
 ```
 python -m pytest --no-header (2026-09-16, T-037)         → 472 passed, 2 skipped (live-Postgres-

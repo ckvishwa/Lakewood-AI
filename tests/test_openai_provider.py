@@ -215,7 +215,7 @@ def test_anthropic_default_wire_path_still_works(http, monkeypatch):
     provider = make_provider()
     assert isinstance(provider, AnthropicProvider)
     chat = new_session()
-    result = run_turn(chat, LLMInterpreter(provider), 'Pizza')
+    result = run_turn(chat, LLMInterpreter(provider), 'Large pizza')
     assert result.calls[0]['result']['status'] == 'ok'
     req, body, _ = http[1][0]
     assert req.full_url == 'https://api.anthropic.com/v1/messages'

@@ -99,6 +99,16 @@ def test_round_trip_preserves_coupon(sess):
     assert restored.order.coupon_discount == sess.order.coupon_discount == 300
 
 
+def test_round_trip_preserves_disclosure_played_at(sess):
+    """T-057: a non-None value must actually survive the round trip —
+    `test_round_trip_preserves_every_dataclass_field` alone can't prove
+    this, since it stays None in that fixture either way."""
+    oe.mark_disclosure_played(sess)
+    assert sess.disclosure_played_at is not None
+    restored = session_from_dict(session_to_dict(sess))
+    assert restored.disclosure_played_at == sess.disclosure_played_at
+
+
 def test_from_dict_rejects_unknown_version(sess):
     d = session_to_dict(sess)
     d["_version"] = 999

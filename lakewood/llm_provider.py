@@ -119,7 +119,7 @@ class OpenAIProvider:
                      "Authorization": f"Bearer {self.api_key}"})
         start = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:  # nosec B310 -- fixed https:// vendor URL constant / local Ollama host, never customer-influenced
                 raw = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace").replace(self.api_key, "[REDACTED]")[:300]
@@ -230,7 +230,7 @@ class ExperientialProvider:
                      "Authorization": f"Bearer {self.api_key}"})
         start = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as response:
+            with urllib.request.urlopen(req, timeout=self.timeout) as response:  # nosec B310 -- fixed https:// vendor URL constant / local Ollama host, never customer-influenced
                 raw = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace").replace(self.api_key, "[REDACTED]")[:300]
@@ -330,7 +330,7 @@ class OllamaProvider:
     def _check_model_installed(self) -> None:
         try:
             req = urllib.request.Request(f"{self.host}/api/tags", method="GET")
-            with urllib.request.urlopen(req, timeout=10.0) as resp:
+            with urllib.request.urlopen(req, timeout=10.0) as resp:  # nosec B310 -- fixed https:// vendor URL constant / local Ollama host, never customer-influenced
                 raw = json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as e:
             raise ProviderConfigError(
@@ -382,7 +382,7 @@ class OllamaProvider:
             method="POST", headers={"content-type": "application/json"})
         start = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # nosec B310 -- fixed https:// vendor URL constant / local Ollama host, never customer-influenced
                 raw = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:300]
@@ -465,7 +465,7 @@ class AnthropicProvider:
             })
         start = time.monotonic()
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:  # nosec B310 -- fixed https:// vendor URL constant / local Ollama host, never customer-influenced
                 raw = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")[:300]

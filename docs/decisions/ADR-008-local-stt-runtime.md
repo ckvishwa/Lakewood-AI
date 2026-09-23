@@ -1,6 +1,10 @@
 # ADR-008 — Local STT runtime: faster-whisper
 
-**Status:** Accepted · 2026-09-08
+**Status:** Superseded for the local pilot by ADR-016 · 2026-09-17
+
+This ADR remains the historical rationale for the faster-whisper adapter,
+which is still supported as a CPU fallback. The measured provider choice for
+the local pilot is now Parakeet; see ADR-016.
 
 ## Context
 

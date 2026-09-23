@@ -1,23 +1,99 @@
 """
-Ticket delivery — Epson TM-T88V (ESC/POS).
+Ticket delivery — ESC/POS, written against the TM-T88V command reference.
 
 Why this file matters: PRD §12 said the restaurant sees orders on a dashboard.
 Nobody watches a dashboard during a Friday rush. This is how a confirmed order
 physically reaches the kitchen, and — critically — how we learn whether it did.
 
-The T88V answers real-time status queries, so SENT_TO_STORE -> STORE_ACKED is a
-real acknowledgement, not an assumption. A ticket that didn't print becomes a
+T-049 FINAL (2026-09-23): the real hardware is confirmed **Epson TM-m30III**
+(model label M374C, self-identified via its own web config), wired Ethernet
+at 10.1.10.197:9100, real-print-verified (see docs/STATUS.md's T-049 FINAL
+entry for the physical ticket, real DLE EOT status behavior, and real
+paper-out/cover-open/network-down observations — not inferred from spec).
+`DLE EOT` is confirmed supported by this model per Epson's own published
+TM-m30III command list; exact status-bit MEANINGS were cross-checked against
+real device behavior this session, not assumed from the TM-T88V reference
+this module was originally written against. Status-bit semantics for any
+model NOT yet tested this way remain exactly what the name says: TM-T88V's
+documented values, unconfirmed elsewhere.
+
+The status-query design (DLE EOT, answered even mid-job) is real for genuine
+TM-series printers in general, so SENT_TO_STORE -> STORE_ACKED is meant to be
+a real acknowledgement, not an assumption — and is now confirmed true for the
+real TM-m30III this task verified. A ticket that didn't print becomes a
 FAILED_DISPATCH that pages someone, instead of a lost order nobody knows about.
 """
 
 from __future__ import annotations
 
+import re
 import socket
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
 from .timefmt import format_12h
+
+
+# ---------------------------------------------------------------------------
+# Transport seam (T-049 FINAL) — same pattern as STT/TTS/LLM providers.
+# Formatting and dispatch policy (below) never know which transport is
+# active; no transport type leaks past this module. Deliberately NOT a
+# broader protocol/formatting/dispatch refactor — only what the seam needs.
+# ---------------------------------------------------------------------------
+
+class PrintTransport(Protocol):
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes: ...
+
+
+class DryRunTransport:
+    """Tests' default — never touches a socket or device."""
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        return b"\x12" * expect_reply
+
+
+class TcpRawTransport:
+    """LAN, port 9100 — the real, verified connection to the real hardware
+    (ADR-003's original decision; confirmed live against a real TM-m30III
+    this task, see docs/STATUS.md)."""
+    def __init__(self, host: str, port: int = 9100, timeout: float = 3.0):
+        self.host, self.port, self.timeout = host, port, timeout
+
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        with socket.create_connection((self.host, self.port), self.timeout) as s:
+            s.sendall(payload)
+            if expect_reply:
+                s.settimeout(self.timeout)
+                return s.recv(expect_reply)
+        return b""
+
+
+class UsbDeviceTransport:
+    """The pre-existing `device=` path (e.g. /dev/usb/lp0) — unchanged
+    behavior, not this task's real hardware (which is Ethernet)."""
+    def __init__(self, device: str):
+        self.device = device
+
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        with open(self.device, "wb") as f:
+            f.write(payload)
+        return b""
+
+
+class ServerDirectTransport:
+    """NOT built — a named slot for T-053's topology decision, not an
+    implementation. The real TM-m30III's web config has a Cloud Services
+    tab (Epson Connect-style cloud registration) confirmed present but
+    DISABLED this task (docs/STATUS.md's T-049 FINAL entry has exactly what
+    it offers and why it was left off — enabling it registers the device
+    with an external Epson cloud service, a real, consequential action out
+    of this task's scope). If a future cloud deployment needs the printer
+    to poll for jobs instead of accepting inbound connections, T-053
+    decides whether to implement this class for real."""
+    def __init__(self, *a, **kw):
+        raise NotImplementedError(
+            "ServerDirectTransport is a named slot for T-053 — not built. "
+            "See docs/STATUS.md's T-049 FINAL entry.")
 
 # --- ESC/POS ---------------------------------------------------------------
 ESC, GS, DLE, EOT = b"\x1b", b"\x1d", b"\x10", b"\x04"
@@ -36,7 +112,11 @@ FEED        = lambda n: ESC + b"d" + bytes([n])
 # announces itself — a silent ticket in a loud kitchen gets missed.
 BUZZ        = ESC + b"p\x00\x32\xfa"
 
-WIDTH = 42          # Font A on 80mm paper
+WIDTH = 48          # Font A on 80mm paper — physically confirmed on the
+                    # real TM-m30III (T-049 FINAL): a 48-char calibration
+                    # line filled one physical line exactly (zero room left
+                    # for a 3-char suffix); 42 (the old T88V-spec guess)
+                    # printed safely but wasted 6 real columns per line.
 
 
 @dataclass
@@ -72,30 +152,34 @@ class TicketPrinter:
 
     def __init__(self, host: str | None = None, port: int = 9100,
                  timeout: float = 3.0, dry_run: bool = False,
-                 device: str | None = None):
+                 device: str | None = None,
+                 transport: PrintTransport | None = None):
         self.host, self.port, self.timeout = host, port, timeout
         self.dry_run = dry_run
         self.device = device          # e.g. /dev/usb/lp0 for a USB unit
         self.last_output: bytes = b""
+        # Explicit `transport` (tests, ServerDirectTransport once T-053
+        # builds it) wins; otherwise selected from the same host/device/
+        # dry_run args exactly as before — the public constructor is
+        # unchanged, only what it builds internally is new.
+        if transport is not None:
+            self.transport: PrintTransport | None = transport
+        elif dry_run:
+            self.transport = DryRunTransport()
+        elif device:
+            self.transport = UsbDeviceTransport(device)
+        elif host:
+            self.transport = TcpRawTransport(host, port, timeout)
+        else:
+            self.transport = None
 
     # -- transport ---------------------------------------------------------
 
     def _send(self, payload: bytes, expect_reply: int = 0) -> bytes:
         self.last_output = payload
-        if self.dry_run:
-            return b"\x12" * expect_reply      # a "ready" byte
-        if self.device:
-            with open(self.device, "wb") as f:
-                f.write(payload)
-            return b""
-        if not self.host:
+        if self.transport is None:
             raise DispatchError("No printer host or device configured.")
-        with socket.create_connection((self.host, self.port), self.timeout) as s:
-            s.sendall(payload)
-            if expect_reply:
-                s.settimeout(self.timeout)
-                return s.recv(expect_reply)
-        return b""
+        return self.transport.send(payload, expect_reply)
 
     # -- status ------------------------------------------------------------
 
@@ -127,6 +211,25 @@ class TicketPrinter:
 
     # -- formatting --------------------------------------------------------
 
+    # T-056 (docs/SECURITY_AUDIT_T054.md, finding T054-06): every ASCII
+    # control byte except \n — \n is legitimate (_wrap()'s own line-break
+    # convention for address/note); every other control byte (ESC 0x1B, GS
+    # 0x1D, DLE 0x10, and the rest of 0x00-0x1F/0x7F) is real ESC/POS
+    # command syntax and must never reach the printer from customer text.
+    _CONTROL_BYTES_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+    @classmethod
+    def _sanitize(cls, text: str, keep_newlines: bool = False) -> str:
+        """Strip control bytes from a customer-supplied field before it
+        enters the ESC/POS byte stream — the cart-line text three lines
+        below this method's caller already gets this treatment via
+        `.encode("ascii", "replace")`; name/phone/address/note (this
+        class's only free-text customer input) previously did not."""
+        if not text:
+            return text
+        cleaned = cls._CONTROL_BYTES_RE.sub("", text)
+        return cleaned if keep_newlines else cleaned.replace("\n", " ")
+
     @staticmethod
     def _wrap(text: str, indent: int = 0) -> list[str]:
         out, width = [], WIDTH - indent
@@ -152,6 +255,13 @@ class TicketPrinter:
         Layout mirrors the store's existing PrISM ticket so re-keying is fast:
         order type banner, contact block, then items in PrISM's own button order.
         """
+        # T-056: sanitize every customer-supplied free-text field before any
+        # of it is interpolated into the ESC/POS byte stream below.
+        name = self._sanitize(name)
+        phone = self._sanitize(phone)
+        address = self._sanitize(address, keep_newlines=True)
+        note = self._sanitize(note, keep_newlines=True)
+
         b = [INIT, ALIGN_C]
         b += [BOLD_ON, SIZE_2W2H,
               f"** {order_type.upper()} **\n".encode(), SIZE_NORMAL, BOLD_OFF]

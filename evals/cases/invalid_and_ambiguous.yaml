@@ -22,15 +22,17 @@
   assert_final: {subtotal: "0.00", state: BUILDING}
 
 - id: INVALID-002
-  tags: [invalid, topping_not_found]
+  tags: [invalid, topping_not_found, substitution_guard]
+  # T-039A: "truffle oil" is an unexplained product word riding along with
+  # "small cheese," not pizza shorthand — same correction as ADV-002.
+  # Routed to a real menu lookup instead of assuming pizza intent.
   setup: {order_type: pickup}
   turns:
     - user: "small cheese with truffle oil"
       calls:
-        - {tool: add_item, args: {item: CHEESE PIZZA, size: small}}
-        - {tool: add_modifier, args: {line_id: L1, modifier: "truffle oil"}, expect_error: TOPPING_NOT_FOUND}
-      forbid: [confirm_order]
-  assert_final: {subtotal: "11.00", state: BUILDING}
+        - {tool: search_menu, args: {query: "small cheese with truffle oil"}}
+      forbid: [add_item, confirm_order]
+  assert_final: {subtotal: "0.00", state: BUILDING}
 
 - id: INVALID-003
   tags: [invalid, gourmet_not_found]

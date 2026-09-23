@@ -60,10 +60,12 @@ CREATE TABLE sessions (
 CREATE INDEX sessions_store_updated_idx ON sessions (store_id, updated_at);
 CREATE INDEX sessions_store_customer_idx ON sessions (store_id, customer_id);
 
--- Confirmed orders. Insert-only from the application's point of view (F12) —
--- nothing in `postgres_repository.py` ever UPDATEs a row here. A correction
+-- Confirmed orders. Insert-only for the ORDER ITSELF (F12) — a correction
 -- after confirmation creates a new linked order (future phase), never edits
--- this one.
+-- this one's content/total/ticket. One deliberate exception, added in
+-- 0002_dispatch_status.up.sql: `dispatch_status`/`dispatched_at` ARE
+-- updated post-insert — that's a physical-world fact settling after
+-- confirmation, not a correction to the order.
 CREATE TABLE confirmed_orders (
     store_id          TEXT NOT NULL REFERENCES stores(store_id),
     order_id          TEXT NOT NULL,

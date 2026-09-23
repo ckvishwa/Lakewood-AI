@@ -23,13 +23,34 @@ graph TD
     O --> C[coupons.py<br/>4 offers, exclusive]
     P --> M[menu.py<br/>pure data, screenshot-verified]
     C --> P
-    O -.CURRENT: dry_run only.-> PR[printer.py<br/>ESC/POS TM-T88V]
+    O -.CURRENT: dispatch wired, real hardware verified (T-049 FINAL).-> PR[printer.py<br/>ESC/POS, Epson TM-m30III @ 10.1.10.197:9100]
     CF[config.py<br/>env only] --> O
 ```
 
 **State lives in a `Session` dataclass held in memory.** It dies with the
 process. This is fine for a library and unacceptable for a phone call — see
 Phase 3.
+
+**Printer (T-049 FINAL, 2026-09-23): real hardware verified, CURRENT.**
+Epson TM-m30III (model label M374C), wired Ethernet, static IP
+10.1.10.197:9100 — the earlier T-049 sessions' "M347C, never run against
+hardware" was corrected once the real device was reachable and self-
+identified via its own web config. `lakewood/printer.py`'s `PrintTransport`
+seam (`TcpRawTransport`/`DryRunTransport`/`UsbDeviceTransport`, plus a
+`ServerDirectTransport` named slot for T-053) now sits between formatting/
+dispatch policy and the wire; `WIDTH` corrected 42 -> 48 (physically
+measured: a 48-character line exactly fills one physical line on the paper
+loaded). Real, physically-verified this task: a hardcoded test ticket, a
+real confirmed-order ticket (half-and-half rendered unambiguously, coupon
+code, total, cut), a full voice-order-to-print demo, and a live cable-pull
+producing a real `FAILED_DISPATCH` (21s real retry/backoff) followed by
+real recovery via `redispatch_pending_orders` once reconnected — see
+docs/STATUS.md's T-049 FINAL entry for the physical descriptions and exact
+timings. `confirmed_orders.dispatch_status` (migration `0002_dispatch_
+status`) makes an order that never reached the kitchen durably visible and
+recoverable across a process restart, closing the gap the prior T-049
+session disclosed. The store's OWN existing printer (PrISM-connected,
+no network card) remains untouched — ADR-003's isolation decision, unaffected.
 
 ## TARGET (pilot)
 
@@ -47,7 +68,7 @@ graph LR
     ORD --> COU[coupons]
     ORD --> STORE_DB[(Postgres, multi-tenant<br/>sessions · confirmed_orders · customers — T-037)]
     ORD -->|CONFIRMED| DISP[dispatcher]
-    DISP -->|open| PRN[Dedicated TM-T88V<br/>tcp/9100]
+    DISP -->|open| PRN[Dedicated TM-m30III<br/>tcp/9100, verified T-049 FINAL]
     DISP -->|closed| Q[held queue]
     Q -->|at opening| PRN
     DISP -->|3 failures| ALERT[Page on-call + SMS store]
@@ -139,8 +160,13 @@ CURRENT menu before anything is quoted (a `cart_hash` match proves contents
 didn't change, never that today's price is the same one quoted before).
 **CURRENT (T-038 Phase 1):** `chat.py::PersistentChat` wires this into the
 text path, with one executor shared by rule-based and staged LLM tools;
-confirmation uses durable persistence. Voice, TTS, and telephony remain
-PLANNED.
+confirmation uses durable persistence. **CURRENT (T-038 Phase 2 + T-050),
+local dev loop only:** `lakewood/voice.py::LocalVoiceLoop` drives the same
+`PersistentChat.run_turn` over local STT (faster-whisper/Parakeet) and TTS
+(Windows SAPI), with Silero-VAD endpointing (ADR-018) replacing a fixed
+capture window and sentence-pipelined TTS playback. Real production
+telephony (a phone line reaching this loop) remains PLANNED — ADR-004 is
+still open on the vendor.
 
 ## State machine
 
@@ -160,7 +186,7 @@ properties:
 |---|---|---|
 | Telephony | Twilio or Telnyx | low — DID portable |
 | Voice agent (ASR/LLM/TTS) | **decision pending — ADR-004** | medium; keep behind an interface |
-| Printer | Epson TM-T88V, ESC/POS over tcp/9100 | none, open protocol |
+| Printer | Epson TM-m30III (M374C), ESC/POS over tcp/9100, static IP 10.1.10.197 — real hardware verified (T-049 FINAL) | none, open protocol |
 | POS | PrISM — **no integration**, staff re-key | none by design |
 
 Provider types must not appear in `pricing.py`, `orders.py`, or `menu.py`.
