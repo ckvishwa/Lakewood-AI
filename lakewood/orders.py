@@ -57,6 +57,7 @@ from typing import Optional
 from datetime import datetime, timedelta
 
 from . import coupons as cp
+from . import speech
 from .menu import HOURS, DELIVERY_MINIMUM, DELIVERY_RADIUS_MILES
 from .timefmt import format_12h
 from .pricing import (
@@ -1115,7 +1116,7 @@ def begin_confirmation(sess: Session):
                    outstanding_disambiguations=[
                        e["query"] for e in sess.pending_disambiguations])
     q = sess.order.quote()
-    readback = _short_readback(sess, q) + " Should I go ahead and place it?"
+    readback = _short_readback(sess, q) + " Place it?"          # T-051
     sess.to("AWAITING_CONFIRMATION")
     sess.confirmation_turn = sess.turn                     # F14
     return ok(expires_in=CONFIRM_WAIT_SECONDS, readback=readback)
@@ -1171,11 +1172,31 @@ TOOLS = [get_store_info, search_menu, decline_item, check_availability, set_orde
 
 # ---------------------------------------------------------------------------
 # Readback — cart-diff style: items + total, not a 40-second recital
+#
+# T-051: tightened for real spoken latency (docs/STATUS.md's T-051 entry has
+# the measured before/after) WITHOUT dropping any content — every line, every
+# modifier, every half placement, the coupon, and the total are still here.
+# Only two things changed: (1) HOW a token is pronounced, via
+# `lakewood.speech`'s speakable-rendering layer, built from real TTS->STT
+# round-trip evidence, never a guess; (2) filler words around that same
+# content ("That's pickup:" -> "Pickup:", "Should I go ahead and place it?"
+# -> "Place it?" — the latter appended by `begin_confirmation`, not here).
+# The readback remains 100% deterministic — no LLM call anywhere in this
+# function or `_render_line` — that is what makes it the one utterance in
+# this system that cannot hallucinate; see ADR-018's amendment and
+# `tests/test_speech.py::test_readback_is_produced_without_any_model_call`.
 # ---------------------------------------------------------------------------
 
 def _render_line(l) -> str:
     if not isinstance(l, PizzaLine):
-        return f"{l.quantity} {l.name}"
+        name = speech.speakable_item_name(l.name)
+        # T-051: quantity shown only when >1 (matches PizzaLine's own
+        # convention below), and separated by a comma when it IS shown — a
+        # real, measured ambiguity: "1 twelve-piece wings" spoken with no
+        # pause risks being heard as "one hundred twelve" (confirmed even
+        # for cleanly-spoken "one twelve" with no SKU involved at all; a
+        # comma reliably disambiguates it). See docs/STATUS.md T-051.
+        return f"{l.quantity}, {name}" if l.quantity > 1 else name
     parts = [l.display_name()]
     for label, p in (("", "WHOLE"), ("first half", "HALF_1"), ("second half", "HALF_2")):
         g = [t for t in l.toppings if t.portion == p]
@@ -1186,18 +1207,37 @@ def _render_line(l) -> str:
             pre = "no " if t.removed else ("light " if t.lite else
                                            ("double " if t.qty == 2 else
                                             ("triple " if t.qty == 3 else "")))
-            names.append(pre + t.name.lower())
+            names.append(pre + speech.speakable_topping_name(t.name))
         parts.append((f"{label}: " if label else "") + ", ".join(names))
     s = " — ".join(parts)
     return f"{l.quantity} × {s}" if l.quantity > 1 else s
 
 
+def _speak_list(items: list[str]) -> str:
+    """Natural spoken list join — 'A', 'A and B', 'A, B, and C' — instead of
+    semicolon-joining every line regardless of count. Purely a join-style
+    choice; never drops an item."""
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
 def _short_readback(sess: Session, q: dict) -> str:
-    kind = "delivery" if sess.order.order_type == "DELIVERY" else "pickup"
-    items = "; ".join(_render_line(l) for l in sess.order.lines)
-    line = f"That's {kind}: {items}."
+    kind = "Delivery" if sess.order.order_type == "DELIVERY" else "Pickup"
+    items = _speak_list([_render_line(l) for l in sess.order.lines])
+    line = f"{kind}: {items}."
     if sess.order.coupon_code:
-        line += f" With the {sess.order.coupon_code} discount, ${q['discount']} off."
+        # T-051: the coupon's own `spoken` field (coupons.py — "how a
+        # caller is likely to ask for it") existed for exactly this and was
+        # simply never used here; the raw CODE was spoken instead, which
+        # SAPI reads with literal "underscore" words — measured real, see
+        # docs/STATUS.md T-051.
+        phrase = speech.speakable_coupon_phrase(sess.order.coupon_code)
+        line += f" With {phrase}, ${q['discount']} off."
     line += f" Total ${q['total']}."
     if sess.scheduled_for:
         # Non-negotiable disclosure. A caller must never think an after-hours

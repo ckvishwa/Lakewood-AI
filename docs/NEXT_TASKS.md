@@ -15,9 +15,55 @@ remaining gap is `RuleBasedInterpreter` has NO parsing branch for a single
 bare gourmet number at all — it can order a `CHEESE PIZZA`, a half-and-half
 by two numbers, or resolve a number from a PENDING clarification, but never
 "medium number ten" cold. P0 in the existing backlog, smallest concrete item
-left, now that T-049 (printer, hardware-blocked) and T-050 (voice
-latency) are both done/parked. Voice/telephony work is explicitly P5 in
-CLAUDE.md's priority order — this order-correctness gap outranks it.
+left, now that T-049 (printer, hardware-blocked), T-050 (VAD/streaming), and
+T-051 (readback latency) are all done/parked. Voice/telephony/latency work
+is explicitly P5 in CLAUDE.md's priority order — this order-correctness gap
+outranks all of it.
+
+## T-051 · The 15-second readback — **DONE, 2026-09-22**
+
+**Priority:** 1 (task-assigned) · **Status:** Done — diagnosis, fix, tests,
+real-stack measurement all complete; see `docs/STATUS.md`'s T-051 entry for
+the full account, real numbers, and evidence.
+
+Short version: a real confirmation readback's spoken duration was cut
+37-47% (worst case 17.24s -> 9.19s) via three deterministic, content-
+preserving changes — tighter phrasing, a new evidence-based speakable-
+rendering layer (`lakewood/speech.py`) for tokens SAPI actually
+mispronounces (measured via real TTS->STT round trip, not guessed), and a
+capped speech-rate increase (`Rate=3`, ADR-015 amended with the ceiling and
+its justification). Completeness (every line/modifier/half-placement/total
+still present) is property-tested against 200 generated carts and mutation-
+proven against the real call path, not just asserted. Real-stack
+measurement (WSL Parakeet brought back up this session, real SAPI, real
+RuleBasedInterpreter) shows total system latency down to 3.876s median
+(from T-038's 5.899s baseline, the first apples-to-apples comparison since
+T-038) — talk-time to physically speak the readback, not system
+processing, is now the dominant remaining term.
+
+## T-052 · Post-confirmation reply speaks the raw internal order ID character-by-character
+
+**Priority:** 6 · **Status:** Not started (filed 2026-09-22, found during
+T-051's Part 5 real-stack measurement)
+
+**Found measuring T-051's real stack:** the post-confirmation reply
+("You're all set — order AI-6F56D3, total $19.32. Thanks!",
+`chat.py::_reply_for`'s `confirm_order` branch) measured 8.72 real seconds
+of talk-time for an 11-word sentence — disproportionate, and the likely
+cause is the raw internal `order_id` (a random alphanumeric string) being
+spoken essentially character-by-character. Distinct code path from T-051's
+scope (`_short_readback`/the PRE-confirmation readback) — not fixed there
+on purpose.
+
+**Scope.** Decide what a customer actually needs to hear here: probably
+nothing about the internal order ID at all (staff/kitchen see it on the
+printed ticket — see `lakewood/printer.py`), or a short, deliberately
+speakable reference if one is needed for phone pickup verification. Small,
+contained, `chat.py`-only — no domain/pricing/FSM change.
+
+**Acceptance.** Real before/after talk-time measured for the same reply
+shape; offline suite stays green; no content a customer actually needs
+(order confirmed, total) is removed.
 
 ## T-050 · VAD endpointing + TTS pipelining — **DONE (with honestly-scoped gaps), 2026-09-22**
 

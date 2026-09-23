@@ -63,7 +63,11 @@ def _make_loop(monkeypatch, call_id="VOICE-TTS", tts=None, mic=None):
 
 
 def test_multi_sentence_reply_synthesizes_and_plays_each_sentence_in_order(monkeypatch):
-    tts = _RecordingTTS(synth_delay=0.02)
+    # A larger delay (vs T-050's original 0.02s) keeps the first-audio-vs-
+    # total-synthesis comparison robust to thread-scheduling jitter under
+    # system load (observed flaky at 0.02s on a loaded machine) without
+    # weakening what the assertions actually claim.
+    tts = _RecordingTTS(synth_delay=0.08)
     call, loop, stt = _make_loop(monkeypatch, tts=tts)
     turn = loop.turn()  # "Got it — added a large pepperoni. Anything else?" (2 sentences)
 

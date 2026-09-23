@@ -24,6 +24,242 @@ execution.
 
 ## Current phase
 
+**T-051 done, 2026-09-22 (P1): the 15-second readback fixed to 9.2s worst
+case (down 37-47%), real-stack total turn latency now 3.9s median (down
+from T-038's 5.9s baseline, apples-to-apples on the same Parakeet STT
+provider — the first real, comparable end-to-end number since T-038).**
+Preconditions confirmed first: T-050 committed/pushed (`9832023`), clean
+tree, HEAD matches origin. **WSL Parakeet was down at task start** (Ubuntu
+distro itself was `Stopped`) — brought it up this session (`wsl.exe`
+auto-started the distro; started `scripts/parakeet_server.py` in the
+existing `~/lakewood-stt/NeMo` uv/CUDA venv; model loaded in 12.66s; warm
+inference re-verified at 0.078-0.094s, matching ADR-016's own 0.082s
+exactly) rather than falling back to a substitute provider and mislabeling
+the result, per this task's explicit precondition.
+
+**Part 1 — diagnosis, measured before any code change.** Built 4
+representative real carts (single pizza; half-and-half with modifiers;
+multi-item with drink+wings; coupon order), got their real
+`begin_confirmation` readback text, and measured REAL SAPI audio duration
+at the then-current `Rate=0`:
+
+```
+single pizza (14 words):              8.793s
+half-and-half w/ modifiers (22 words): 12.988s
+multi-item drink+wings (19 words):     12.523s
+coupon order (23 words):               17.237s
+```
+
+**Where the time actually went, verified by real TTS->STT round-trip
+evidence (not assumed):**
+- **Confirmed broken tokens** (SAPI mispronounces these, proven by feeding
+  synthesized audio back through real `faster-whisper` STT and inspecting
+  what came out): `6PC WINGS` -> "6 PC Wings" (PC read as letters);
+  `12PC WINGS` -> "112 PC wings" (also glued to the leading quantity digit —
+  see below); `GARDEN SALAD SM/LG` -> "Garden salad sm."/"...LG." (size
+  suffix read as letters/mumble); `STRWBRY CHZCAKE` -> "Strwbrych's a cake."
+  (unintelligible); the coupon's raw code `OFF_3_AT_30` -> "off underscore 3
+  underscore at underscore 30" (SAPI reads `_` as the literal word
+  "underscore" — measured 5.98s to speak vs 4.54s for the already-existing
+  `coupon.spoken` field "three dollars off thirty," which the readback
+  simply never used). A real topping name has the same defect:
+  `RSTD RED PEPPR` -> "RSTD red pepper" (found auditing toppings the same
+  way after finding the item-name pattern; not in the task's original
+  example list, found because the same method was applied exhaustively,
+  not just to the named examples).
+- **Quantity + digit-leading-token ambiguity**, confirmed even with NO SKU
+  abbreviation involved: `"one twelve"` alone (cleanly spoken, unambiguous
+  numbers) round-trips as `"112"` — a real adjacency-merging artifact.
+  Inserting a comma (`"one, twelve piece wings"`) fixed it in isolation.
+  Not primarily a TTS defect — closer to an STT-side risk that real human
+  listeners could plausibly share for numbers spoken with no pause — treated
+  as real and fixed by giving quantity>1 its own comma-separated clause.
+- **Confirmed CLEAN, verified not to need fixing (measurement, not
+  assumption):** money — `"$16.10"` measured the EXACT SAME real audio
+  duration (2.839s) as the known-correct `"sixteen dollars and ten cents"`,
+  and a clearly-wrong digit-by-digit reading (`"one six point one zero"`)
+  measured meaningfully shorter (2.384s) and structurally different —
+  strong evidence SAPI already reads it as a price, not digit-by-digit.
+  Half-and-half's `"first half: X, second half: Y"` phrasing round-tripped
+  perfectly clean. `2LITER` -> "2-liter" already correct. ~18 of 27
+  NON_PIZZA items and ~37 of 39 toppings round-tripped clean and are
+  intentionally unmapped (`lakewood/speech.py`'s own comments name every
+  one checked).
+- **Verbose phrasing**: "That's pickup: ... Should I go ahead and place
+  it?" carries real framing/closing filler around the same content.
+- **Speech rate itself**: even the CLEANEST cart (single pizza, zero
+  garbled tokens) measured only ~95-99 words/minute at `Rate=0` — genuinely
+  slow versus typical 150-180 wpm conversational/audiobook TTS, confirmed
+  independent of the token issues.
+
+**Part 2 — fixed, in the stated safety order, content never reduced:**
+
+1. **Phrasing** (`lakewood/orders.py::_short_readback`/`_render_line`,
+   deterministic, zero LLM involvement): `"That's pickup: ...; ...; ...."`
+   -> `"Pickup: A, B, and C."`; `"Should I go ahead and place it?"` ->
+   `"Place it?"` (moved to `begin_confirmation`'s own append, unchanged
+   for `request_quote`'s non-confirmation readback). Every line, modifier,
+   half-placement, coupon discount, and total still present — proven, not
+   asserted (see Part 4).
+2. **Token rendering** — new module `lakewood/speech.py`, the speakable-
+   rendering layer this task asked for: maps a raw identifier to how a
+   person says it, NEVER decides content. `SPEAKABLE_ITEM_NAMES`/
+   `SPEAKABLE_TOPPING_NAMES` cover every confirmed-broken token above;
+   `speakable_coupon_phrase` uses the coupon's own pre-existing `spoken`
+   field (`coupons.py` — it existed for exactly this and was simply never
+   used by the readback) instead of the raw code. Unmapped tokens fall
+   through to a safe lowercase passthrough in production (never crash a
+   customer's confirmation over a missing map entry), but
+   `tests/test_speech.py`'s completeness test fails LOUDLY if any real
+   menu item or topping is neither mapped nor explicitly recorded as
+   verified-clean — a genuinely new/uncovered token cannot ship silently.
+3. **Speech rate** — `lakewood/tts/windows_sapi.py`'s `SpeechSynthesizer
+   .Rate`, real-measured across the full -10..+10 range on this machine:
+   `Rate=0` ~99 wpm, `Rate=3` ~142 wpm, `Rate=5` ~177 wpm. Default is now
+   `Rate=3` (~142 wpm, normal conversational pace), hard-capped at
+   `Rate=4` (~158 wpm) — `TTSConfigError` above that. The cap is
+   deliberate: this audio eventually crosses an 8kHz phone line, where
+   speech intelligibility degrades with rate, and nothing above 4 has been
+   validated over real compressed telephony audio. See ADR-015's amendment.
+4. **Inter-sentence silence**: not touched — T-050's sentence pipelining
+   already overlaps synthesis with playback; Part 1 found no measurable
+   dead-air contribution worth trimming separately once 1-3 above landed.
+
+**Real measured result, same 4 carts, phrasing+tokens+rate=3 combined:**
+```
+single pizza:              8.793s -> 5.282s  (-40%)
+half-and-half w/ modifiers: 12.988s -> 8.213s  (-37%)
+multi-item drink+wings:     12.523s -> 7.143s  (-43%)
+coupon order:                17.237s -> 9.185s  (-47%)
+```
+
+**Half-and-half stays unambiguous** — verified directly, not assumed:
+`tests/test_speech.py::test_half_and_half_topping_placement_is_unambiguous`
+asserts BOTH the phrase content AND that "pepperoni" appears before
+"mushrooms" in the string (proves which half is which, not just that both
+words are present somewhere).
+
+**Part 3 — mid-order diff vs. final complete readback, both verified:**
+`add_item`/`add_modifier`/`remove_modifier`/`update_item` were ALREADY
+using `_render_line` on only the single affected line (`description=
+_render_line(line)`) — genuinely diff-only, not a violation, confirmed by
+`test_mid_order_add_item_reply_is_a_diff_not_the_full_cart`. The ONLY
+full-cart reader is `_short_readback`, used by exactly two callers:
+`request_quote` (the customer explicitly asked "what's my total" — a
+summary IS the right response to that specific question, not a violation
+of the diff principle) and `begin_confirmation` (the final readback, which
+must be complete per F16). **Real risk found and reported, not fixed here
+(filed T-033, already on the backlog, explicitly out of this task's
+scope):** if the model calls `request_quote` PROACTIVELY — unprompted, per
+T-033's existing finding — that full-cart readback becomes an unwanted
+mid-order echo, a real second latency problem AND a genuine CLAUDE.md
+cart-diff violation whenever it happens. T-051 does not change this either
+way; it is disclosed because verifying Part 3 surfaced it directly, not
+buried in a test transcript.
+
+**Part 4 — tests that prove completeness (not assertions that it looks
+right):** `tests/test_speech.py`, 20 tests:
+- **Property test** (`test_property_every_line_and_total_appear_in_the_
+  full_readback`): 200 randomly generated real carts (varying size, item
+  mix, toppings, half-and-half), every line's own rendered text AND the
+  total checked present in the final readback — 176+ carts actually
+  exercised (some random combinations are legitimately rejected by real
+  domain guards, e.g. an unpriced topping tier).
+- **Mutation-proven**, against the REAL call path (`begin_confirmation`,
+  not a hand-written stand-in): monkeypatching `orders._short_readback` to
+  drop the last line, or to omit the total, makes the SAME completeness
+  assertion the property test uses fail — proving the guard actually
+  guards, not just looks right.
+- No internal token (`_`, ` PC `, ` SM`, ` LG`, `CHZCAKE`, `RSTD`, a raw
+  `line_id`, `HALF_1`/`HALF_2`) reaches the rendered readback — checked
+  directly against a multi-item coupon cart's real output.
+- The readback is produced without any model call — static source check
+  (no provider/`complete(`/vendor-name reference in either function) plus
+  a direct determinism proof (byte-identical output across 3 repeated
+  calls on the same cart — impossible for anything that consulted a
+  model).
+- Half-and-half unambiguous (above).
+- Mid-order diff vs. final complete readback (Part 3, above), both in one
+  file so a future change can't fix one and silently break the other.
+
+**Part 5 — measured on the real stack, real Parakeet, real SAPI, real
+RuleBasedInterpreter** (no LLM API key assumed available in this
+environment — same interpreter T-038's own real hardware run used, per
+that entry below). Methodology, disclosed exactly like T-050: this
+coding-agent session cannot literally speak into a microphone; real
+TTS-synthesized fixture WAVs (per their own provenance disclosure) were
+fed through the REAL, unmodified `LocalVoiceLoop.turn()` path (real
+`Endpointer`, real Silero VAD, real `ParakeetProvider` over the now-live
+WSL GPU service, real `RuleBasedInterpreter`, real `WindowsSapiTTSProvider`
+at the new `Rate=3` default) — only the raw audio SOURCE is simulated (a
+file played back chunk-by-chunk at real wall-clock pace, in place of a
+live `sd.InputStream`).
+
+```
+OLD (T-038 Phase 2 baseline, Parakeet GPU STT, fixed 5s capture):
+  total: median 5.899s / p95 6.235s
+
+NEW (T-051, this session, Parakeet GPU STT — SAME provider as T-038,
+     Silero-VAD capture, SAPI @ Rate=3):
+  capture:              median 2.766s / p95 3.094s
+  stt:                  median 0.406s / p95 0.469s   (Parakeet, GPU — same
+                         provider as T-038's baseline; this session's
+                         numbers run a little above ADR-016's isolated
+                         0.082s warm figure, still far below faster-
+                         whisper CPU's 2.4s from T-050's forced substitute)
+  app (domain):         median 0.000s / p95 0.000s
+  tts first audio:      median 0.374s / p95 0.390s
+  tts synthesis total:  median 0.703s / p95 0.719s
+  total (system latency, excludes playback talk-time):
+                         median 3.876s / p95 4.157s   <- FIRST real,
+                         apples-to-apples comparison to T-038 since T-038
+  perceived (speech-end -> first audio):
+                         median 0.781s / p95 0.828s
+
+Full confirmation readback (real cart: large pepperoni, no onions):
+  "Pickup: LARGE CHEESE PIZZA — pepperoni, no onions. Total $19.32. Place it?"
+  synthesis: 1.031s   playback (real talk-time): 10.859s
+
+Post-confirmation reply:
+  "You're all set — order AI-6F56D3, total $19.32. Thanks!"
+  synthesis: 0.719s   playback (real talk-time): 8.719s
+```
+
+**Plain verdict.** System-side processing latency is now genuinely
+tolerable for a phone call — median 3.876s total, and 0.781s PERCEIVED
+(speech-end to first audio), a real, apples-to-apples ~34% cut from
+T-038's 5.899s baseline on the identical STT provider. **The next dominant
+term is no longer system latency — it is real spoken talk-time itself**,
+which this task cut substantially (37-47%) but cannot cut further without
+either shortening content (forbidden by F16) or raising speech rate past
+the phone-line-safety ceiling this task deliberately set. The final
+readback alone still takes 10.86 real seconds to physically speak for a
+two-line order; a full build-to-confirmation call is dominated by talk-time
+across several turns, not by any one system stage.
+
+**Incidental finding, reported at full severity, NOT fixed here (different
+code path — `chat.py::_reply_for`'s `confirm_order` branch, not
+`_short_readback`; out of this task's stated scope, which is the
+PRE-confirmation readback specifically):** the post-confirmation
+"You're all set — order AI-6F56D3..." reply speaks the raw internal
+`order_id` character-by-character-ish (a random alphanumeric string),
+contributing real, avoidable talk-time (measured: 8.72s for an 11-word
+reply) for an identifier a customer has no obvious use for over the phone.
+Filed as T-052.
+
+**Gates run:**
+```
+python -m pytest --no-header -q        → 669 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+```
+T-016 offline/no-network gate: unaffected — this task touched no
+persistence/network code. **No prompt or tool-schema surface was touched**
+(checked directly: `interpreter.py`'s system prompt/tool descriptions
+reference "the readback" generically, never the literal old wording) — so
+no live LLM N=3 gate was required, stated explicitly, not skipped silently.
+
 **T-050 done (with honestly-scoped gaps), 2026-09-22 (P1): VAD endpointing
 replaces the fixed 5-second capture window; TTS is sentence-pipelined; STT
 and LLM streaming are NOT implemented, for stated reasons, not silently
