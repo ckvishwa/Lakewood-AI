@@ -24,6 +24,88 @@ execution.
 
 ## Current phase
 
+**T-058 done, 2026-09-23 (P0): fixed `main` — CI permissions +
+dispatch-status "state collision" (misdiagnosed in the brief; actually a
+single real-time dependency bug).**
+
+**Root cause, precisely.** `dispatch_confirmed_order` (`printer.py`)
+calls `orders.store_status()` with no `now` argument, so it reads REAL
+wall-clock time. `HELD_FOR_OPEN` is legitimate, correctly-implemented,
+already-documented after-hours behavior (T-049 FINAL;
+`_record_dispatch_outcome`'s own docstring already reasons about it
+staying `PENDING` on purpose) — **not** a second, competing state
+vocabulary from an uncoordinated session, despite that being a
+reasonable-looking hypothesis from the symptom alone. Ten tests
+(`test_dispatch_status.py` ×4, `test_printer_dispatch.py` ×6) exercised
+`dispatch_confirmed_order`/`confirm_and_persist`/`redispatch_pending_
+orders` with a real printer and assumed an in-hours dispatch, but never
+pinned that — so they passed locally purely because dev sessions happen
+to run during hours that map to "open," and failed on GitHub Actions
+because the runner's UTC clock landed on Wednesday `22:0x` — `HOURS`'
+exclusive upper bound `(11, 22)` reads hour 22 itself as already closed.
+**Same bug either way; the only difference was a coincidence of when the
+suite happened to run relative to `HOURS`, not a logic difference
+between environments.**
+
+**Fix — `tests/conftest.py`'s new `open_store`/`closed_store` fixtures**,
+pinning `orders.store_status()` deterministically. All 10 tests now
+force the precondition their own scenario actually requires; none of the
+ten's *expected values* were changed — CLAUDE.md's own warning against
+"author the label to match behavior" was checked against directly and
+did not apply here, since the after-hours behavior itself was never in
+question, only the tests' missing setup. Two new regression tests pin
+the boundary explicitly (`test_in_hours_confirmed_order_never_lands_in_
+held_for_open`, `test_after_hours_confirmed_order_never_lands_in_
+dispatched`).
+
+**Lesson filed, not just the bug:** any test exercising code with a
+real-time/environment dependency (`datetime.now()`, `time.time()`,
+timezone, hostname, etc.) must pin that dependency explicitly — passing
+locally is not evidence of hermeticity, only evidence of what time it
+happened to be. `docs/NEXT_TASKS.md` gets a standing rule from this.
+
+**CI permissions (Part 1):** `gitleaks-action`'s PR-diff mode calls
+`GET /repos/.../pulls/{n}/commits` on a `pull_request` trigger — the
+workflow-level `contents: read` didn't cover it, and a **private** repo's
+default `GITHUB_TOKEN` is more restrictive than a public one's (the repo
+went private between sessions — see the branch-protection note below).
+Fixed: `pull-requests: read` added to the `secret-scan` job.
+**Verified against a real PR** (`gh pr checks`), not just a YAML read —
+see this task's own PR for the actual green run.
+
+**Branch protection — now unavailable, flagged, not silently worked
+around.** `PUT .../branches/main/protection` (enabled last session) now
+returns 403: `"Upgrade to GitHub Pro or make this repository public"` —
+branch protection requires GitHub Pro/Team on a private repo. **The repo
+went private since T-054's own session** (confirmed `isPrivate: true`
+this task, was `false` when branch protection was enabled). **Nothing
+currently blocks a red-CI merge to `main` except discipline** — the exact
+gap that let this task's own red run merge in the first place. Filed as
+an open risk in `docs/SECURITY_AUDIT_T054.md`, not fixed here (a paid
+upgrade or going back to public are both real tradeoffs, not this task's
+call to make unilaterally).
+
+**Part 0 preconditions — checked directly, both still unmet, unaddressed
+since T-043/2026-09-22:** `codex-windows-sandbox-service.exe` is still
+running (PID 34804, same PID as last session — never stopped), and
+`~/.codex/config.toml` still registers both `d:\projects\ai` and the
+anomalous nested `d:\projects\ai\evals` as trusted Codex roots. Not
+touched this task (another tool's configuration, outside this repo,
+already an owner action per T-054) — reported honestly rather than
+assumed fixed, per this task's own explicit instruction.
+
+**Also found and fixed, Part 0.2:** `.tmp/` was only ignored *indirectly*
+via `*.log`/`*.wav` patterns — a scratch file of any other extension
+(`.json`/`.txt`/confirmed live: `bandit.json`, `pip_audit.json`,
+`secret_scan.txt` were sitting un-ignored this session) was NOT covered
+and could have been swept into a commit by a careless `git add .`, the
+exact pattern that already happened once with `tmp_sapi_test.wav`.
+`.gitignore` now ignores `.tmp/` outright.
+
+Full suite 709 passed/2 skipped/2 xfailed, `validate` 91/91, ratchet
+59/91, parity 50/50 — reproduced fresh, zero regressions from any of
+this task's fixes.
+
 **T-055/T-057 (mechanism)/T-056 (code half) done, 2026-09-23 (P0):**
 closed the 3 code-fixable Criticals T-054 found. `apply_coupon` now
 requires real customer evidence (`_coupon_apply_authorized`, mirrors

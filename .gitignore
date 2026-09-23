@@ -9,6 +9,15 @@ evals/traces/
 env/
 lakewood/env/
 
+# T-058: `.tmp/` was only ignored INDIRECTLY, via *.log/*.wav patterns
+# matching most of what usually lands there — a scratch file of any other
+# extension (.json/.txt/.sarif/...) was NOT ignored and could be swept
+# into a commit by a careless `git add .`/`git add -A`, the exact pattern
+# that already happened once with tmp_sapi_test.wav. Ignore the whole
+# directory outright; it has always been meant as scratch space, never a
+# tracked path.
+.tmp/
+
 .env
 .env.*
 !.env.example
@@ -27,6 +36,12 @@ htmlcov/
 *.zip
 $voiceTmp
 .claude/*.lock
+
+# T-052: stray debug artifacts that have no business being tracked —
+# tmp_sapi_test.wav was swept in by the initial commit's `git add .`.
+/tmp_sapi_test.wav
+*.wav
+!lakewood/stt/fixtures/*.wav
 
 models/
 checkpoints/
