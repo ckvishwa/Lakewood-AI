@@ -103,7 +103,7 @@ class PostgresSessionRepository(SessionRepository):
         terminal = tuple(TERMINAL)
         with self._conn.cursor() as cur:
             cur.execute(
-                f"""
+                """
                 SELECT s.session_json FROM sessions s
                 JOIN customers c ON c.store_id = s.store_id AND c.customer_id = s.customer_id
                 WHERE s.store_id = %s AND c.phone_normalized = %s
@@ -167,14 +167,14 @@ class PostgresSessionRepository(SessionRepository):
 
     def get_confirmed_order(self, store_id: str, order_id: str) -> Optional[ConfirmedOrder]:
         return self._select_confirmed(
-            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "  # nosec B608 -- f-string is a fixed constant (_CONFIRMED_COLUMNS), never request data; all values parameterized via %s
             "WHERE store_id = %s AND order_id = %s",
             (store_id, order_id))
 
     def get_confirmed_order_by_idempotency_key(
         self, store_id: str, idempotency_key: str) -> Optional[ConfirmedOrder]:
         return self._select_confirmed(
-            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "  # nosec B608 -- f-string is a fixed constant (_CONFIRMED_COLUMNS), never request data; all values parameterized via %s
             "WHERE store_id = %s AND idempotency_key = %s",
             (store_id, idempotency_key))
 
@@ -251,7 +251,7 @@ class PostgresSessionRepository(SessionRepository):
     def list_undispatched_confirmed_orders(self, store_id: str) -> list[ConfirmedOrder]:
         with self._conn.cursor() as cur:
             cur.execute(
-                f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+                f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "  # nosec B608 -- f-string is a fixed constant (_CONFIRMED_COLUMNS), never request data; all values parameterized via %s
                 "WHERE store_id = %s AND dispatch_status != 'DISPATCHED' "
                 "ORDER BY confirmed_at ASC",
                 (store_id,),

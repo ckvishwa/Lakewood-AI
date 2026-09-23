@@ -26,6 +26,7 @@ FAILED_DISPATCH that pages someone, instead of a lost order nobody knows about.
 
 from __future__ import annotations
 
+import re
 import socket
 import time
 from dataclasses import dataclass
@@ -210,6 +211,25 @@ class TicketPrinter:
 
     # -- formatting --------------------------------------------------------
 
+    # T-056 (docs/SECURITY_AUDIT_T054.md, finding T054-06): every ASCII
+    # control byte except \n — \n is legitimate (_wrap()'s own line-break
+    # convention for address/note); every other control byte (ESC 0x1B, GS
+    # 0x1D, DLE 0x10, and the rest of 0x00-0x1F/0x7F) is real ESC/POS
+    # command syntax and must never reach the printer from customer text.
+    _CONTROL_BYTES_RE = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
+
+    @classmethod
+    def _sanitize(cls, text: str, keep_newlines: bool = False) -> str:
+        """Strip control bytes from a customer-supplied field before it
+        enters the ESC/POS byte stream — the cart-line text three lines
+        below this method's caller already gets this treatment via
+        `.encode("ascii", "replace")`; name/phone/address/note (this
+        class's only free-text customer input) previously did not."""
+        if not text:
+            return text
+        cleaned = cls._CONTROL_BYTES_RE.sub("", text)
+        return cleaned if keep_newlines else cleaned.replace("\n", " ")
+
     @staticmethod
     def _wrap(text: str, indent: int = 0) -> list[str]:
         out, width = [], WIDTH - indent
@@ -235,6 +255,13 @@ class TicketPrinter:
         Layout mirrors the store's existing PrISM ticket so re-keying is fast:
         order type banner, contact block, then items in PrISM's own button order.
         """
+        # T-056: sanitize every customer-supplied free-text field before any
+        # of it is interpolated into the ESC/POS byte stream below.
+        name = self._sanitize(name)
+        phone = self._sanitize(phone)
+        address = self._sanitize(address, keep_newlines=True)
+        note = self._sanitize(note, keep_newlines=True)
+
         b = [INIT, ALIGN_C]
         b += [BOLD_ON, SIZE_2W2H,
               f"** {order_type.upper()} **\n".encode(), SIZE_NORMAL, BOLD_OFF]

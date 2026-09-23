@@ -24,6 +24,54 @@ execution.
 
 ## Current phase
 
+**T-055/T-057 (mechanism)/T-056 (code half) done, 2026-09-23 (P0):**
+closed the 3 code-fixable Criticals T-054 found. `apply_coupon` now
+requires real customer evidence (`_coupon_apply_authorized`, mirrors
+`_authorize_item_creation`) before reaching the real tool — the exact
+exploit reproduction is blocked, `ADV-001`'s label tightened to actually
+prove it (was `subtotal`-only, which a discount doesn't touch). The
+call-recording disclosure mechanism exists now (`Session
+.disclosure_played_at`, `mark_disclosure_played`, wired into
+`LocalVoiceLoop.turn()` — plays before the first transcription of a
+call, once, persisted immediately). `TicketPrinter._sanitize` strips
+ASCII control bytes from customer-supplied name/phone/address/note
+before they reach the ESC/POS byte stream. 30 new tests total across
+`tests/test_llm_interpreter.py`, `tests/test_orders.py`, `tests/
+test_persistence_serialization.py`, `tests/test_voice_tts_pipeline.py`,
+`tests/test_printer_dispatch.py`. Full suite 707 passed/2 skipped/2
+xfailed, `validate` 91/91, ratchet 59/91, parity 50/50, bandit clean —
+zero regressions. **Still open, owner/legal actions, not code:**
+changing the printer's admin password off its factory default (T-056),
+and confirming the disclosure wording against the restaurant's actual
+jurisdiction before a real pilot call (T-057). T-053 (telephony)
+engineering work may proceed; a real pilot call should not, until those
+two close.
+
+**T-054 done, 2026-09-23 (P0): security + CI audit, ahead of T-053
+(telephony — this system's first internet-exposed endpoint). Full report:
+`docs/SECURITY_AUDIT_T054.md`.** Repo confirmed public on GitHub with
+zero branch protection and zero CI before this task (`.github/workflows/
+ci.yml` added this task: full offline gate + gitleaks + pip-audit +
+bandit, all blocking). Four Criticals found, all filed, none silently
+fixed: `apply_coupon` has no evidence gate on the LLM path and a scripted
+reproduction moved a real $4.00 discount with zero customer request
+behind it (escalates T-046/T-028 to P0, filed as **T-055**); the kitchen
+printer's admin password is still its factory default AND that value is
+committed in plaintext in this public repo (filed as **T-056**, along
+with an ESC/POS command-injection gap in the same file); no
+call-recording disclosure/consent mechanism exists anywhere in code or
+schema (filed as **T-057**, blocks T-053); Codex still has this repo
+registered as a trusted project root and a Codex process was running
+during this audit — the exact precondition of the T-043 incident,
+unaddressed since 2026-09-22 (owner action, not a task ID). No git-
+history secrets found; no SQL injection, command injection, path
+traversal, or unsafe deserialization found (all checked directly, not
+assumed). Trivial fixes applied same task: stray junk file removed, a
+debug `.wav` untracked, 9 bandit false positives documented/suppressed.
+Full suite unaffected: 683 passed/2 skipped/2 xfailed, `validate` 91/91,
+ratchet 59/91, parity 50/50 — all reproduced fresh this task, zero
+regressions. **T-053 does not start until T-055/T-056/T-057 close.**
+
 **T-049 FINAL done, 2026-09-23 (P1): real hardware confirmed, real print
 verified, real reliability path (retry, FAILED_DISPATCH, durable dispatch
 status, recovery) proven live against real hardware — physical ticket

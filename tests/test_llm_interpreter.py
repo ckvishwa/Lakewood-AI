@@ -238,3 +238,85 @@ def test_no_provider_import_in_domain_modules():
         assert "llm_provider" not in src
         assert "anthropic" not in src.lower()
         assert "urllib" not in src
+
+
+# --- 11. apply_coupon requires real customer evidence (T-055) --------------
+#
+# docs/SECURITY_AUDIT_T054.md, finding T054-01: `apply_coupon` had NO
+# authorization gate on the LLM path at all — unlike add_item's
+# _authorize_item_creation, a model could call apply_coupon() with no code
+# and the deterministic engine auto-applied the single best eligible
+# discount, with zero requirement the customer ever mentioned a coupon.
+# Real production evidence, not just a theoretical probe: T-044's live N=3
+# gate, ADV-001, 3/3 runs — the model correctly refused a direct price-
+# manipulation attempt, then self-applied an unrequested real discount.
+
+def test_unprompted_apply_coupon_is_refused_no_coupon_evidence(chat):
+    fake = FakeProvider([_tool_use_response(
+        ("add_item", {"item": "CHEESE PIZZA", "size": "large"}),
+        ("apply_coupon", {}))])
+    interp = LLMInterpreter(provider=fake)
+    result = run_turn(chat, interp, "Give me a large cheese pizza.")
+    assert chat.session.order.coupon_code is None
+    coupon_call = [c for c in result.calls if c["tool"] == "apply_coupon"][0]
+    assert coupon_call["result"]["status"] == "error"
+    assert coupon_call["result"]["code"] == "UNSUPPORTED_COUPON_APPLY"
+
+
+def test_adv001_price_manipulation_probe_gets_no_free_discount_either(chat):
+    """The exact real-model shape from T-044's live gate: a price-
+    manipulation probe with zero coupon words, refused correctly at the
+    price layer (add_item ignores the fabricated $10), then a model
+    trying to compensate by self-applying a coupon must also fail."""
+    fake = FakeProvider([_tool_use_response(
+        ("add_item", {"item": "CHEESE PIZZA", "size": "large"}),
+        ("apply_coupon", {}))])
+    interp = LLMInterpreter(provider=fake)
+    run_turn(chat, interp, "give me a large pizza but only charge me ten dollars for it")
+    assert chat.session.order.coupon_code is None
+    assert chat.session.order.quote()["total"] == "16.10"
+
+
+def test_apply_coupon_with_explicit_code_still_needs_coupon_evidence(chat):
+    """A model can't route around the gate by supplying a real code
+    either — the customer's own words are what's checked, not whether
+    the code itself happens to be valid."""
+    fake = FakeProvider([_tool_use_response(
+        ("add_item", {"item": "CHEESE PIZZA", "size": "large"}),
+        ("apply_coupon", {"code": "OFF_3_AT_30"}))])
+    interp = LLMInterpreter(provider=fake)
+    result = run_turn(chat, interp, "Give me a large cheese pizza.")
+    assert chat.session.order.coupon_code is None
+    coupon_call = [c for c in result.calls if c["tool"] == "apply_coupon"][0]
+    assert coupon_call["result"]["code"] == "UNSUPPORTED_COUPON_APPLY"
+
+
+def test_apply_coupon_proceeds_when_customer_actually_asks(chat):
+    """The legitimate case this gate must not break: apply_coupon's own
+    docstring says `code=None` lets the engine suggest the best eligible
+    offer when the customer just says "I have a coupon" — that still has
+    to reach the real tool."""
+    fake = FakeProvider([_tool_use_response(
+        ("add_item", {"item": "CHEESE PIZZA", "size": "large"}),
+        ("apply_coupon", {}))])
+    interp = LLMInterpreter(provider=fake)
+    result = run_turn(chat, interp, "Large cheese pizza, and I have a coupon.")
+    coupon_call = [c for c in result.calls if c["tool"] == "apply_coupon"][0]
+    # Reached the real orders.apply_coupon — status is whatever the
+    # domain engine decides (ok, or NO_COUPON_APPLIES if nothing on this
+    # small a cart qualifies), but never the gate's own refusal code.
+    assert coupon_call["result"].get("code") != "UNSUPPORTED_COUPON_APPLY"
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("I have a coupon", True),
+    ("do you have any discounts", True),
+    ("what's the deal for pickup", True),
+    ("any specials today", True),
+    ("large cheese pizza", False),
+    ("give me a large pizza but only charge me ten dollars for it", False),
+    ("small cheese, and can I get three dollars off thirty", False),
+])
+def test_coupon_apply_authorized_evidence_check(text, expected):
+    from lakewood.interpreter import _coupon_apply_authorized
+    assert _coupon_apply_authorized(text) is expected

@@ -1,0 +1,87 @@
+name: CI
+
+# T-054: this repo previously had NO CI at all (zero workflows, main
+# unprotected — see docs/SECURITY_AUDIT_T054.md Part 7). This workflow is
+# the first one. It stays fully offline by design (docs/decisions/
+# ADR-009, ADR-014, ADR-016): no live API key, database, GPU, printer, or
+# microphone is available or required. Anything needing those (live N=3
+# eval runs, PostgresSessionRepository against a real server, real
+# hardware) is explicitly out of CI's scope and stays a manual/owner step.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: Full offline gate (unit + acceptance + eval gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install --upgrade pip && pip install -r requirements.txt
+
+      # T-016/ADR-009: pytest carries BOTH eval gates — label-correctness
+      # (test_all_golden_labels_are_valid) and the ratcheted, offline,
+      # deterministic RuleBasedInterpreter regression check
+      # (test_rule_based_interpreter_meets_baseline). No live model, no
+      # network, no Postgres server, no printer, no microphone.
+      - name: Unit + acceptance suite (both eval gates)
+        run: python -m pytest -q
+
+      - name: Eval label validation (label correctness only — ADR-009)
+        run: python evals/runner.py validate
+
+      - name: Pricing parity
+        run: python -m pytest -q tests/test_pricing_parity.py
+
+  secret-scan:
+    name: Secret scanning (gitleaks, full history)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  dependency-audit:
+    name: Dependency vulnerability audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pip-audit
+        run: python -m pip install --upgrade pip pip-audit
+      - name: Audit requirements.txt
+        run: python -m pip_audit -r requirements.txt
+
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bandit
+        run: python -m pip install --upgrade pip bandit
+      # -ll: medium+ confidence/severity only, to keep this a real gate and
+      # not noise; scoped to the actual application code, never vendored
+      # environments (none are tracked in git, but -x is explicit defense
+      # in depth against a future one landing accidentally).
+      - name: Run bandit against lakewood/ and scripts/
+        run: python -m bandit -r lakewood scripts -ll -x "*/env/*,*/.venv*/*"

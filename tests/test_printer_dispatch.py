@@ -236,3 +236,68 @@ def test_no_printer_configured_leaves_confirm_untouched():
 
     assert result["status"] == "ok"
     assert sess.state == "CONFIRMED"  # never moved by a dispatch that never ran
+
+
+# ---------------------------------------------------------------------------
+# T-056 (docs/SECURITY_AUDIT_T054.md, finding T054-06) — ESC/POS
+# command-injection guard: control bytes in customer-supplied free text
+# (name/phone/address/note) must never reach the printer payload.
+# ---------------------------------------------------------------------------
+
+def _payload_text(payload: bytes) -> str:
+    """Best-effort readable view of a built payload for substring checks —
+    real ESC/POS byte constants are excluded by nature of not decoding
+    cleanly as printable text; this is only used to assert ABSENCE of
+    injected control bytes, never used to assert exact formatting."""
+    return payload.decode("latin-1")
+
+
+def test_build_strips_escape_byte_from_note():
+    p = TicketPrinter(dry_run=True)
+    injected = "extra cheese\x1b!\x38please"  # \x1b = ESC — real ESC/POS syntax
+    payload = p.build("", "carry-out", "AI-000001", note=injected)
+    assert b"\x1b!\x38" not in payload
+
+
+def test_build_strips_gs_byte_from_address():
+    p = TicketPrinter(dry_run=True)
+    injected = "123 Main St\x1dV\x00"  # \x1d = GS — e.g. a fabricated cut command
+    payload = p.build("", "delivery", "AI-000002", address=injected)
+    assert b"\x1dV\x00" not in payload
+
+
+def test_build_strips_dle_byte_from_name():
+    p = TicketPrinter(dry_run=True)
+    injected = "John\x10\x04\x01Doe"  # \x10\x04 = DLE EOT — a real status query
+    payload = p.build("", "carry-out", "AI-000003", name=injected)
+    assert b"\x10\x04" not in payload
+
+
+def test_build_strips_control_bytes_from_phone():
+    p = TicketPrinter(dry_run=True)
+    injected = "555\x1b@1234"  # \x1b@ = ESC @ — printer INIT/reset
+    payload = p.build("", "carry-out", "AI-000004", name="A Customer", phone=injected)
+    assert b"\x1b@1234" not in payload
+
+
+def test_build_preserves_ordinary_text_content():
+    """The fix must not eat legitimate content — only real control bytes."""
+    p = TicketPrinter(dry_run=True)
+    payload = p.build("", "delivery", "AI-000005",
+                      name="O'Brien", address="123 Main St, Apt 4B",
+                      note="ring the bell, leave at door")
+    text = _payload_text(payload)
+    assert "O'Brien" in text
+    assert "123 Main St" in text
+    assert "ring the bell" in text
+
+
+def test_sanitize_keeps_newline_only_when_requested():
+    assert TicketPrinter._sanitize("line1\nline2", keep_newlines=True) == "line1\nline2"
+    assert TicketPrinter._sanitize("line1\nline2", keep_newlines=False) == "line1 line2"
+
+
+def test_sanitize_strips_every_ascii_control_byte_except_newline():
+    every_control = "".join(chr(c) for c in list(range(0x20)) + [0x7f])
+    cleaned = TicketPrinter._sanitize(every_control, keep_newlines=True)
+    assert cleaned == "\n"  # only \n (0x0a) survives

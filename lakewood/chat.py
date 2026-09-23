@@ -271,6 +271,28 @@ class PersistentChat:
             save_progress(self.repo, self.chat.session)
         return result
 
+    @property
+    def disclosure_played_at(self):
+        """T-057: whether/when the recording/AI disclosure has been spoken
+        on this call — None means it has not, and no transcription may
+        proceed. Read-only view; use mark_disclosure_played() to set it."""
+        if self.chat is None:
+            raise RuntimeError("resume must be accepted or declined before disclosure can play")
+        return self.chat.session.disclosure_played_at
+
+    def mark_disclosure_played(self) -> dict:
+        """T-057 (docs/SECURITY_AUDIT_T054.md, finding T054-04): the one
+        call-start hook a real call-handling loop (LocalVoiceLoop today;
+        T-053's phone loop tomorrow) calls to record that the disclosure
+        was actually spoken, before the first transcription. Persisted
+        immediately — a dropped call/crash right after must not lose
+        proof the disclosure played."""
+        if self.chat is None:
+            raise RuntimeError("resume must be accepted or declined before disclosure can play")
+        r = oe.mark_disclosure_played(self.chat.session)
+        save_progress(self.repo, self.chat.session)
+        return r
+
 
 def _format_hit_name(h: dict) -> str:
     if h["kind"] == "gourmet":

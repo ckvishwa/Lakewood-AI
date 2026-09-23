@@ -399,6 +399,43 @@ _AUTHORIZED_REASONS = {
     AUTH_CUSTOMER_CONFIRMED_PENDING_CANDIDATE,
 }
 
+# T-055 (docs/SECURITY_AUDIT_T054.md, finding T054-01): `apply_coupon` had
+# NO authorization gate at all on the LLM path — unlike add_item's
+# _authorize_item_creation, a model could call apply_coupon() with no code
+# and the deterministic engine auto-applies the single best eligible
+# discount, with zero requirement the customer ever mentioned a coupon.
+# Confirmed two ways: live, T-044's ADV-001 (3/3 real-model runs, a price-
+# manipulation probe deflected correctly but followed by an unrequested
+# real discount), and by direct reproduction (a scripted model issuing
+# add_item then apply_coupon({}) against an utterance with zero coupon
+# words silently applied a real $4.00 discount). A coupon isn't a menu SKU,
+# so this needs no search_menu/menu-grounding machinery like item
+# authorization does — a small, curated, closed-class evidence vocabulary
+# is the whole check, the same shape CLAUDE.md itself sanctions for
+# ordinary connective filler ("or phrases like 'can I please get' would
+# block every order"). Deliberately does NOT include bare "off" — COUPON-
+# 002 ("small cheese, and can I get three dollars off thirty") is an
+# existing, already-passing corpus case that must keep refusing without
+# the literal word "coupon"/"discount"/etc.
+AUTH_UNSUPPORTED_COUPON_APPLY = "UNSUPPORTED_COUPON_APPLY"
+
+_COUPON_EVIDENCE_WORDS = {
+    "coupon", "coupons", "discount", "discounts", "deal", "deals",
+    "promo", "promos", "promotion", "promotions", "offer", "offers",
+    "special", "specials",
+}
+
+
+def _coupon_apply_authorized(text: str) -> bool:
+    """True only when the customer's OWN current utterance contains real
+    evidence they're asking about a coupon/discount — never the model's
+    own initiative. Mirrors _authorize_item_creation's "a retrieved/
+    proposed action is never self-authorizing" principle, scaled down to
+    what apply_coupon actually needs: no SKU to ground against, just
+    positive evidence this turn is about a coupon at all."""
+    t = text.lower()
+    return any(re.search(rf"\b{re.escape(w)}\b", t) for w in _COUPON_EVIDENCE_WORDS)
+
 
 def _size_word_matches(text: str, canonical_size: str) -> bool:
     """T-044: does ANY spoken alias for THIS canonical size appear in
@@ -1356,6 +1393,15 @@ class LLMInterpreter:
                                     if auth_reason == AUTH_AMBIGUOUS_CANDIDATE_NOT_CONFIRMED
                                     else "That doesn't match what was asked for — "
                                          "could you clarify what you'd like?")}
+                elif name == "apply_coupon" and not _coupon_apply_authorized(text):
+                    # T-055 — the coupon-side mutation boundary, same
+                    # principle as add_item's above: a model calling
+                    # apply_coupon (with or without a code) never reaches
+                    # the real tool unless the customer's own current words
+                    # give evidence they asked about a coupon/discount.
+                    r = {"status": "error", "code": AUTH_UNSUPPORTED_COUPON_APPLY,
+                         "message": "I didn't hear you ask about a coupon or "
+                                    "discount — did you want to apply one?"}
                 else:
                     args = {k: v for k, v in args.items()
                             if k not in _MODEL_HIDDEN_ARGS.get(name, set())}

@@ -90,9 +90,17 @@ def test_reply_text_is_never_spoken_before_the_domain_layer_produced_it(monkeypa
     """Never let partial/streamed text bypass validation: every sentence
     handed to synthesize() must be a substring of the ALREADY-COMPLETE
     domain-produced reply — nothing is ever spoken before `run_turn`
-    finishes building the real reply string."""
+    finishes building the real reply string.
+
+    T-057: turn 1 also synthesizes the fixed call-disclosure text before
+    capture even begins — a deliberate, separate, non-domain utterance,
+    not something this test is about. Runs a second turn (disclosure
+    already played, so it's silent from here on) to isolate the claim."""
     tts = _RecordingTTS(synth_delay=0.0)
     call, loop, stt = _make_loop(monkeypatch, tts=tts)
+    loop.turn()  # turn 1 — disclosure plays here, not the claim under test
+    tts.events.clear()
+    stt.default_transcript = "what's my total?"
     turn = loop.turn()
     spoken_text = " ".join(e[1] for e in tts.events if e[0] == "synth")
     for word in spoken_text.split():
@@ -127,7 +135,13 @@ def test_capture_never_starts_before_previous_turns_playback_finished(monkeypatc
     stt.default_transcript = "yes place it"
     loop.turn()  # begin_confirmation — this turn's reply is the readback
 
-    assert order[0] == "capture"
+    # T-057: turn 1 plays the call disclosure before its own capture — a
+    # legitimate "play" ahead of the first "capture," not a violation of
+    # the half-duplex guarantee this test proves (which is about capture
+    # never starting before a PRECEDING play has finished, and that holds
+    # here too: the disclosure's play still comes before turn 1's capture).
+    assert order[0] == "play"
+    assert order[1] == "capture"
     capture_positions = [i for i, k in enumerate(order) if k == "capture"]
     # every capture after the first is immediately preceded by a play —
     # i.e. the previous turn's audio had fully finished before this
@@ -156,3 +170,53 @@ def test_confirmation_readback_audio_never_bleeds_into_next_turns_transcript(mon
     # the confirm turn's own transcript is exactly what STT returned for
     # THIS capture — never the readback text, never a merge of the two.
     assert confirm_turn.transcript == "go ahead"
+
+
+# --- T-057: call-recording disclosure plays before the first transcription -
+
+def test_disclosure_plays_before_the_first_transcription(monkeypatch):
+    from lakewood import orders as oe
+
+    tts = _RecordingTTS(synth_delay=0.0)
+    mic = _FakeMic()
+    call, loop, stt = _make_loop(monkeypatch, tts=tts, mic=mic)
+
+    assert call.disclosure_played_at is None
+    loop.turn()
+    assert call.disclosure_played_at is not None
+    synth_texts = [e[1] for e in tts.events if e[0] == "synth"]
+    assert oe.DISCLOSURE_TEXT in synth_texts
+
+
+def test_disclosure_never_replays_on_later_turns(monkeypatch):
+    tts = _RecordingTTS(synth_delay=0.0)
+    call, loop, stt = _make_loop(monkeypatch, tts=tts)
+
+    loop.turn()
+    first_played_at = call.disclosure_played_at
+    from lakewood import orders as oe
+    assert oe.DISCLOSURE_TEXT in [e[1] for e in tts.events if e[0] == "synth"]
+
+    tts.events.clear()
+    stt.default_transcript = "what's my total?"
+    loop.turn()
+    assert oe.DISCLOSURE_TEXT not in [e[1] for e in tts.events if e[0] == "synth"]
+    assert call.disclosure_played_at == first_played_at  # unchanged, not re-timestamped
+
+
+def test_disclosure_played_at_survives_a_reload(monkeypatch):
+    """T-057 + ADR-014: the proof-of-disclosure must survive a dropped
+    call/crash, the same durability guarantee every other session field
+    gets — persisted immediately, not batched with the next mutation."""
+    monkeypatch.setenv("LAKEWOOD_INTERPRETER", "rule_based")
+    from lakewood.chat import PersistentChat
+    from lakewood.persistence.memory_repository import InMemorySessionRepository
+
+    repo = InMemorySessionRepository()
+    call = PersistentChat.start(repo, "+12037588880", "VOICE-RELOAD", "+12035551234")
+    call.mark_disclosure_played()
+    played_at = call.disclosure_played_at
+
+    reloaded = PersistentChat.start(repo, "+12037588880", "VOICE-RELOAD", "+12035551234")
+    reloaded.accept_resume() if reloaded.resume_offer is not None else None
+    assert reloaded.disclosure_played_at == played_at

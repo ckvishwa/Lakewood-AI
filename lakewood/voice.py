@@ -11,6 +11,7 @@ rather than glossed over.
 from __future__ import annotations
 import os, queue, re, statistics, tempfile, threading, time, wave
 from dataclasses import dataclass, replace
+from . import orders as oe
 from .chat import PersistentChat, make_interpreter
 from .config import CONFIG
 from .persistence.memory_repository import InMemorySessionRepository
@@ -234,6 +235,15 @@ class LocalVoiceLoop:
         turn_start=time.monotonic()
         cleanup=[path]
         try:
+            # T-057: the recording/AI disclosure must be spoken before the
+            # FIRST transcription of a call — never inferred, never skipped.
+            # One-time call-setup cost, deliberately excluded from this
+            # turn's own latency numbers (capture/stt/app/tts below measure
+            # the conversational turn, not call setup).
+            if self.call.disclosure_played_at is None:
+                _, _, _, _, disclosure_paths = self._speak_reply(oe.DISCLOSURE_TEXT, path)
+                cleanup.extend(disclosure_paths)
+                self.call.mark_disclosure_played()
             capture=self.microphone.capture(path, seconds)
             started=time.monotonic()
             try:

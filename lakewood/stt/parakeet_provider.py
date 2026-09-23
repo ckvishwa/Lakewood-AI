@@ -93,7 +93,7 @@ class ParakeetProvider:
         )
         started = time.monotonic()
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:  # nosec B310 -- base_url validated http(s)+loopback+no-credentials at __init__ (line 41-47), never customer-influenced
                 payload = json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = _http_error_detail(exc)

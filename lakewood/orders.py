@@ -401,6 +401,15 @@ class Session:
     quote_at: Optional[float] = None
 
     scheduled_for: Optional[str] = None      # set when the order is taken after hours
+    # T-057 (docs/SECURITY_AUDIT_T054.md, finding T054-04): the recording/
+    # AI-disclosure notice must play before transcription begins on a real
+    # call, and the fact it played must be provable, not assumed — this is
+    # the persisted proof. Set once, deterministically, by
+    # mark_disclosure_played() below; never by a caller guessing. Lives in
+    # the same session_json JSONB blob every other Session field already
+    # round-trips through (ADR-014 Decision 3 — not a query target, so no
+    # new indexed column).
+    disclosure_played_at: Optional[float] = None
     parse_failures: int = 0
     transfer_reason: Optional[str] = None
     idempotency: dict = field(default_factory=dict)
@@ -511,6 +520,31 @@ def _do_transfer(sess: Session, reason: str):
     sess.to("TRANSFERRED")
     return ok(action="transfer", reason=reason,
               say="Let me get someone from the store on the line for you.")
+
+
+# T-057 (docs/SECURITY_AUDIT_T054.md, finding T054-04): fixed disclosure
+# text a real call-handling layer (LocalVoiceLoop today; T-053's real
+# phone loop tomorrow, same call-start hook) must speak before the FIRST
+# transcription of a call. Wording is deliberately conservative and
+# generic — a real go-live still needs the actual legal requirement
+# confirmed for the restaurant's specific jurisdiction (one-party vs.
+# two-party consent varies by state); this is not that confirmation.
+DISCLOSURE_TEXT = (
+    "This call may be recorded, and you're speaking with an automated "
+    "assistant."
+)
+
+
+def mark_disclosure_played(sess: Session) -> dict:
+    """T-057: record that the disclosure was actually spoken, once,
+    deterministically — never inferred from "a TTS call happened" or
+    assumed by a caller. Idempotent: a call-loop retry or a duplicate
+    invocation never overwrites the original timestamp (the first real
+    playback is the fact that matters, not the latest attempt)."""
+    if sess.disclosure_played_at is None:
+        sess.disclosure_played_at = time.time()
+        sess.log("disclosure_played", at=sess.disclosure_played_at)
+    return ok(disclosure_played_at=sess.disclosure_played_at)
 
 
 # ---------------------------------------------------------------------------

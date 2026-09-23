@@ -96,6 +96,7 @@ def session_to_dict(sess: Session) -> dict:
         "quote_hash": sess.quote_hash,
         "quote_at": sess.quote_at,
         "scheduled_for": sess.scheduled_for,
+        "disclosure_played_at": sess.disclosure_played_at,
         "parse_failures": sess.parse_failures,
         "transfer_reason": sess.transfer_reason,
         "idempotency": dict(sess.idempotency),
@@ -148,6 +149,7 @@ def session_from_dict(d: dict) -> Session:
     sess.quote_hash = d["quote_hash"]
     sess.quote_at = d["quote_at"]
     sess.scheduled_for = d["scheduled_for"]
+    sess.disclosure_played_at = d.get("disclosure_played_at")
     sess.parse_failures = d["parse_failures"]
     sess.transfer_reason = d["transfer_reason"]
     sess.idempotency = dict(d["idempotency"])
