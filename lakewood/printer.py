@@ -5,20 +5,22 @@ Why this file matters: PRD §12 said the restaurant sees orders on a dashboard.
 Nobody watches a dashboard during a Friday rush. This is how a confirmed order
 physically reaches the kitchen, and — critically — how we learn whether it did.
 
-T-049 (2026-09-22): the dedicated unit that actually arrived is labeled
-**Epson M347C**, not a TM-T88V. Epson's M-number -> TM-series mapping is not
-publicly documented and this repo has never had the device reachable from a
-session that could inspect it (checked: no USB/serial/network path to it from
-this environment — see STATUS.md's T-049 entry). Status-bit semantics, paper
-width, and cut-command support below are UNVERIFIED against the real M347C —
-they are the TM-T88V spec's assumptions, unconfirmed. Do not treat a clean
-`dispatch()` return as proof this byte-level protocol is correct on real
-hardware; it only proves the dry-run/state-machine logic around it is.
+T-049 FINAL (2026-09-23): the real hardware is confirmed **Epson TM-m30III**
+(model label M374C, self-identified via its own web config), wired Ethernet
+at 10.1.10.197:9100, real-print-verified (see docs/STATUS.md's T-049 FINAL
+entry for the physical ticket, real DLE EOT status behavior, and real
+paper-out/cover-open/network-down observations — not inferred from spec).
+`DLE EOT` is confirmed supported by this model per Epson's own published
+TM-m30III command list; exact status-bit MEANINGS were cross-checked against
+real device behavior this session, not assumed from the TM-T88V reference
+this module was originally written against. Status-bit semantics for any
+model NOT yet tested this way remain exactly what the name says: TM-T88V's
+documented values, unconfirmed elsewhere.
 
 The status-query design (DLE EOT, answered even mid-job) is real for genuine
 TM-series printers in general, so SENT_TO_STORE -> STORE_ACKED is meant to be
-a real acknowledgement, not an assumption — but that meaning depends on the
-still-unverified assumption above. A ticket that didn't print becomes a
+a real acknowledgement, not an assumption — and is now confirmed true for the
+real TM-m30III this task verified. A ticket that didn't print becomes a
 FAILED_DISPATCH that pages someone, instead of a lost order nobody knows about.
 """
 
@@ -27,9 +29,70 @@ from __future__ import annotations
 import socket
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Protocol
 
 from .timefmt import format_12h
+
+
+# ---------------------------------------------------------------------------
+# Transport seam (T-049 FINAL) — same pattern as STT/TTS/LLM providers.
+# Formatting and dispatch policy (below) never know which transport is
+# active; no transport type leaks past this module. Deliberately NOT a
+# broader protocol/formatting/dispatch refactor — only what the seam needs.
+# ---------------------------------------------------------------------------
+
+class PrintTransport(Protocol):
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes: ...
+
+
+class DryRunTransport:
+    """Tests' default — never touches a socket or device."""
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        return b"\x12" * expect_reply
+
+
+class TcpRawTransport:
+    """LAN, port 9100 — the real, verified connection to the real hardware
+    (ADR-003's original decision; confirmed live against a real TM-m30III
+    this task, see docs/STATUS.md)."""
+    def __init__(self, host: str, port: int = 9100, timeout: float = 3.0):
+        self.host, self.port, self.timeout = host, port, timeout
+
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        with socket.create_connection((self.host, self.port), self.timeout) as s:
+            s.sendall(payload)
+            if expect_reply:
+                s.settimeout(self.timeout)
+                return s.recv(expect_reply)
+        return b""
+
+
+class UsbDeviceTransport:
+    """The pre-existing `device=` path (e.g. /dev/usb/lp0) — unchanged
+    behavior, not this task's real hardware (which is Ethernet)."""
+    def __init__(self, device: str):
+        self.device = device
+
+    def send(self, payload: bytes, expect_reply: int = 0) -> bytes:
+        with open(self.device, "wb") as f:
+            f.write(payload)
+        return b""
+
+
+class ServerDirectTransport:
+    """NOT built — a named slot for T-053's topology decision, not an
+    implementation. The real TM-m30III's web config has a Cloud Services
+    tab (Epson Connect-style cloud registration) confirmed present but
+    DISABLED this task (docs/STATUS.md's T-049 FINAL entry has exactly what
+    it offers and why it was left off — enabling it registers the device
+    with an external Epson cloud service, a real, consequential action out
+    of this task's scope). If a future cloud deployment needs the printer
+    to poll for jobs instead of accepting inbound connections, T-053
+    decides whether to implement this class for real."""
+    def __init__(self, *a, **kw):
+        raise NotImplementedError(
+            "ServerDirectTransport is a named slot for T-053 — not built. "
+            "See docs/STATUS.md's T-049 FINAL entry.")
 
 # --- ESC/POS ---------------------------------------------------------------
 ESC, GS, DLE, EOT = b"\x1b", b"\x1d", b"\x10", b"\x04"
@@ -48,7 +111,11 @@ FEED        = lambda n: ESC + b"d" + bytes([n])
 # announces itself — a silent ticket in a loud kitchen gets missed.
 BUZZ        = ESC + b"p\x00\x32\xfa"
 
-WIDTH = 42          # Font A on 80mm paper
+WIDTH = 48          # Font A on 80mm paper — physically confirmed on the
+                    # real TM-m30III (T-049 FINAL): a 48-char calibration
+                    # line filled one physical line exactly (zero room left
+                    # for a 3-char suffix); 42 (the old T88V-spec guess)
+                    # printed safely but wasted 6 real columns per line.
 
 
 @dataclass
@@ -84,30 +151,34 @@ class TicketPrinter:
 
     def __init__(self, host: str | None = None, port: int = 9100,
                  timeout: float = 3.0, dry_run: bool = False,
-                 device: str | None = None):
+                 device: str | None = None,
+                 transport: PrintTransport | None = None):
         self.host, self.port, self.timeout = host, port, timeout
         self.dry_run = dry_run
         self.device = device          # e.g. /dev/usb/lp0 for a USB unit
         self.last_output: bytes = b""
+        # Explicit `transport` (tests, ServerDirectTransport once T-053
+        # builds it) wins; otherwise selected from the same host/device/
+        # dry_run args exactly as before — the public constructor is
+        # unchanged, only what it builds internally is new.
+        if transport is not None:
+            self.transport: PrintTransport | None = transport
+        elif dry_run:
+            self.transport = DryRunTransport()
+        elif device:
+            self.transport = UsbDeviceTransport(device)
+        elif host:
+            self.transport = TcpRawTransport(host, port, timeout)
+        else:
+            self.transport = None
 
     # -- transport ---------------------------------------------------------
 
     def _send(self, payload: bytes, expect_reply: int = 0) -> bytes:
         self.last_output = payload
-        if self.dry_run:
-            return b"\x12" * expect_reply      # a "ready" byte
-        if self.device:
-            with open(self.device, "wb") as f:
-                f.write(payload)
-            return b""
-        if not self.host:
+        if self.transport is None:
             raise DispatchError("No printer host or device configured.")
-        with socket.create_connection((self.host, self.port), self.timeout) as s:
-            s.sendall(payload)
-            if expect_reply:
-                s.settimeout(self.timeout)
-                return s.recv(expect_reply)
-        return b""
+        return self.transport.send(payload, expect_reply)
 
     # -- status ------------------------------------------------------------
 

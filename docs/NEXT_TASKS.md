@@ -2,7 +2,33 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
-## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection — RECOMMENDED NEXT
+## T-052 · Post-confirmation reply speaks the raw internal order ID character-by-character — RECOMMENDED NEXT
+
+**Priority:** 6 · **Status:** Not started (filed 2026-09-22, found during
+T-051's Part 5 real-stack measurement; recommended next per T-049 FINAL's
+own closing instruction — small, contained, real hardware not required)
+
+**Found measuring T-051's real stack, seen again in T-049 FINAL's live
+demo:** the post-confirmation reply ("You're all set — order AI-089BDA,
+total $19.32. Thanks!", `chat.py::_reply_for`'s `confirm_order` branch)
+measures disproportionate real talk-time for an 11-word sentence — the
+likely cause is the raw internal `order_id` (a random alphanumeric string)
+being spoken essentially character-by-character. Distinct code path from
+T-051's scope (`_short_readback`/the PRE-confirmation readback) — not
+fixed there on purpose.
+
+**Scope.** Decide what a customer actually needs to hear here: probably
+nothing about the internal order ID at all (staff/kitchen see it on the
+printed ticket — see `lakewood/printer.py`, real-verified by T-049 FINAL),
+or a short, deliberately speakable reference if one is needed for phone
+pickup verification. Small, contained, `chat.py`-only — no domain/pricing/
+FSM change.
+
+**Acceptance.** Real before/after talk-time measured for the same reply
+shape; offline suite stays green; no content a customer actually needs
+(order confirmed, total) is removed.
+
+## T-017 · `RuleBasedInterpreter` can't parse a bare "number N" as a single gourmet selection
 
 **Priority:** 0 · **Status:** Not started (filed 2026-09-08, still open)
 
@@ -14,11 +40,10 @@ through to `search_menu` (safe), not a silent `CHEESE PIZZA`. The real
 remaining gap is `RuleBasedInterpreter` has NO parsing branch for a single
 bare gourmet number at all — it can order a `CHEESE PIZZA`, a half-and-half
 by two numbers, or resolve a number from a PENDING clarification, but never
-"medium number ten" cold. P0 in the existing backlog, smallest concrete item
-left, now that T-049 (printer, hardware-blocked), T-050 (VAD/streaming), and
-T-051 (readback latency) are all done/parked. Voice/telephony/latency work
-is explicitly P5 in CLAUDE.md's priority order — this order-correctness gap
-outranks all of it.
+"medium number ten" cold. Still P0 in the existing backlog by CLAUDE.md's
+own priority order (order correctness outranks voice/latency polish) — T-052
+is recommended first only because T-049 FINAL's own closing instruction
+named it explicitly; this remains the next order-correctness item after it.
 
 ## T-051 · The 15-second readback — **DONE, 2026-09-22**
 
@@ -41,30 +66,6 @@ RuleBasedInterpreter) shows total system latency down to 3.876s median
 T-038) — talk-time to physically speak the readback, not system
 processing, is now the dominant remaining term.
 
-## T-052 · Post-confirmation reply speaks the raw internal order ID character-by-character
-
-**Priority:** 6 · **Status:** Not started (filed 2026-09-22, found during
-T-051's Part 5 real-stack measurement)
-
-**Found measuring T-051's real stack:** the post-confirmation reply
-("You're all set — order AI-6F56D3, total $19.32. Thanks!",
-`chat.py::_reply_for`'s `confirm_order` branch) measured 8.72 real seconds
-of talk-time for an 11-word sentence — disproportionate, and the likely
-cause is the raw internal `order_id` (a random alphanumeric string) being
-spoken essentially character-by-character. Distinct code path from T-051's
-scope (`_short_readback`/the PRE-confirmation readback) — not fixed there
-on purpose.
-
-**Scope.** Decide what a customer actually needs to hear here: probably
-nothing about the internal order ID at all (staff/kitchen see it on the
-printed ticket — see `lakewood/printer.py`), or a short, deliberately
-speakable reference if one is needed for phone pickup verification. Small,
-contained, `chat.py`-only — no domain/pricing/FSM change.
-
-**Acceptance.** Real before/after talk-time measured for the same reply
-shape; offline suite stays green; no content a customer actually needs
-(order confirmed, total) is removed.
-
 ## T-050 · VAD endpointing + TTS pipelining — **DONE (with honestly-scoped gaps), 2026-09-22**
 
 **Priority:** 5 · **Status:** Part 1 (VAD) and Part 3-TTS (sentence
@@ -86,65 +87,39 @@ construction, proven by a real 3-turn confirmation-flow test. 20 new tests
 across `tests/test_vad.py`, `tests/test_voice_tts_pipeline.py`,
 `tests/test_voice_vad_microphone.py`.
 
-## T-051 · Windows SAPI's default speaking rate makes confirmation readbacks slow (real customer-facing wait, not a system-latency problem)
+## T-049 · Printer hardware bring-up + end-to-end dispatch — **DONE, 2026-09-23**
 
-**Priority:** 6 · **Status:** Not started (filed 2026-09-22, found during T-050's Part 5 measurement)
+**Priority:** 1 · **Status:** Done — real hardware verified end to end, see
+`docs/STATUS.md`'s T-049 FINAL entry for the full account (real photos,
+real timings, real failure/recovery cycle).
 
-**Found while measuring T-050:** a real 13-word reply measured 6.77 seconds
-of actual audio duration via `WindowsSapiTTSProvider` (`System.Speech
-.Synthesis.SpeechSynthesizer`, default `Rate=0`); a real 3-sentence
-confirmation readback ("That's pickup: LARGE CHEESE PIZZA — pepperoni, no
-onions. Total $19.32. Should I go ahead and place it?") measured over 15
-real seconds to speak. Every latency stage T-050 addressed (capture, STT,
-app, TTS synthesis) could be instant and a customer would still wait 15+
-seconds to hear a 3-sentence confirmation — this is real talk-time, not a
-processing bottleneck, and T-050's sentence-pipelining does not reduce it
-(it only moves WHEN the customer starts hearing audio, not how long the
-full reply takes to finish saying).
+Short version: real device is an **Epson TM-m30III** (M374C), wired
+Ethernet, static IP 10.1.10.197:9100. Two of three network preconditions
+FAILED at task start — DHCP still Auto, and the printer's Wi-Fi Direct AP
+(compromised password, per the brief's own warning) was actively
+broadcasting — both fixed this session via the printer's own admin web
+config (password = its physical serial number) rather than proceeding
+around them. `PrintTransport` seam added (`TcpRawTransport`/
+`DryRunTransport`/`UsbDeviceTransport`, `ServerDirectTransport` a named,
+unbuilt T-053 slot) with zero change to `TicketPrinter`'s public
+constructor. `WIDTH` corrected 42 -> 48 (physically measured). Real prints
+verified by photo at every stage: a hardcoded test ticket, a real
+confirmed-order ticket (half-and-half unambiguous, coupon, total, cut), a
+full voice-to-print demo, and a live cable-pull producing a real 21-second
+retry/backoff, `FAILED_DISPATCH`, and — after reconnecting — real recovery
+via `redispatch_pending_orders`, idempotent (proven live by running it
+twice).
 
-**Scope.** `lakewood/tts/windows_sapi.py`'s `SpeechSynthesizer.Rate`
-property (range -10..+10, default 0) — a one-line PowerShell script change,
-no domain/prompt impact. Needs a real-audio sanity check (too fast reads as
-robotic/unclear, not just "faster") before picking a value; report the
-before/after real audio duration for the same sentences measured in T-050's
-STATUS.md entry, not an estimate.
-
-**Acceptance.** Same confirmation readback re-measured with a real audio
-duration meaningfully under today's 15s, still intelligible (owner or a
-real listener confirms, not just "the number went down"); offline suite
-stays green (this module has no test coverage of literal SAPI output
-today, appropriately, since it needs Windows/PowerShell — confirm and state
-that explicitly).
-
-## T-049 · Printer hardware bring-up + end-to-end dispatch — **PARTIAL, hardware-blocked (2026-09-22)**
-
-**Priority:** 1 · **Status:** Part 3 (dispatch wiring) done and offline-verified;
-Parts 1/2/4 (real hardware verification, real print, live demo) HARD-BLOCKED
-
-See `docs/STATUS.md`'s T-049 entry for the full account. Short version: this
-session has no USB/network path to the restaurant's printer (checked and
-confirmed with the owner in-session), so the ESC/POS byte-level protocol
-against the real **Epson M347C** remains unverified — `lakewood/printer.py`'s
-TM-T88V-spec assumptions are unchanged and now explicitly flagged as such in
-its own module docstring. `dispatch_confirmed_order` is now wired into the
-real `PersistentChat`/persistence path (previously it was written but never
-called from anywhere), with idempotency and failure-safety proven by 13 new
-tests in `tests/test_printer_dispatch.py`.
-
-**Remaining scope, blocked on hardware access:** M347C -> TM-series model
-mapping (paper width, cut command, status-bit semantics, connection type);
-a real ticket printed and checked against physical paper; paper-out/
-cover-open/offline observed on the real device (currently only exercised
-via a status-overriding fake printer, not hardware); the live spoken-order
--> printed-ticket demo. Resume this task once the printer is reachable —
-either physically connected to a session with tool access, or the owner
-runs the physical steps and reports results back for verification.
-
-**Known gap, disclosed not fixed:** no `confirmed_orders` schema field
-tracks dispatch status — a process crash between `finalize_session` and
-dispatch completing means a replayed confirm returns the cached "ok" without
-ever retrying dispatch. Needs a persisted dispatch-status column; out of
-this task's time box.
+**Closed the known gap the prior session disclosed:** `confirmed_orders`
+now has a durable `dispatch_status`/`dispatched_at` (migration
+`0002_dispatch_status`, reversible) — the ONE deliberate exception to that
+table's insert-only design, since dispatch status is a physical-world fact
+that settles after confirmation. `list_undispatched_confirmed_orders` is
+the staff/ops visibility query; `redispatch_pending_orders` is the
+recovery action (manually invoked — no scheduler exists in this codebase
+yet). `held_orders` (named in ARCHITECTURE.md as "Not yet built") does not
+actually exist anywhere to reuse — this column is the smallest correct
+thing instead, per the task's own explicit fallback instruction.
 
 ## T-045 · `_size_supported_by_utterance` has no cross-turn context — a same-size correction turn is wrongly refused
 

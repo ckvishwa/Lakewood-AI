@@ -37,9 +37,12 @@ class ConfirmedOrderExists(ValueError):
 
 @dataclass(frozen=True)
 class ConfirmedOrder:
-    """The durable, immutable record of a placed order. Distinct from the
-    in-flight `Session` row: once written, nothing updates this row again —
-    a correction creates a new linked order, per F12, never an edit."""
+    """The durable record of a placed order. The order's own content/total/
+    ticket are immutable once written — a correction creates a new linked
+    order (F12), never an edit. `dispatch_status`/`dispatched_at` are the
+    ONE deliberate exception (T-049 FINAL): a physical-world fact that
+    settles AFTER confirmation, updated in place via `mark_order_dispatched`/
+    `mark_order_dispatch_failed`, never via `save_confirmed_order` again."""
     store_id: str
     order_id: str
     call_id: str
@@ -49,6 +52,8 @@ class ConfirmedOrder:
     idempotency_key: Optional[str]
     confirmed_at: float
     session_snapshot: dict            # session_to_dict() at the moment of confirmation
+    dispatch_status: str = "PENDING"  # PENDING | DISPATCHED | FAILED
+    dispatched_at: Optional[float] = None
 
 
 class SessionRepository(ABC):
@@ -126,6 +131,29 @@ class SessionRepository(ABC):
         policy) — a longer window than in-flight sessions, and a separate
         method so the two retention periods can never be accidentally
         conflated at a call site."""
+
+    # -- dispatch status (T-049 FINAL) ---------------------------------------
+
+    @abstractmethod
+    def mark_order_dispatched(self, store_id: str, order_id: str, dispatched_at: float) -> None:
+        """The one deliberate post-insert update to a `confirmed_orders`
+        row — see `ConfirmedOrder`'s own docstring. No-op if the order
+        doesn't exist for this tenant (never raises for a caller that lost
+        a race with a purge)."""
+
+    @abstractmethod
+    def mark_order_dispatch_failed(self, store_id: str, order_id: str) -> None:
+        """Sets `dispatch_status='FAILED'` — `printer.py`'s own retries are
+        already exhausted by the time this is called; this does not retry,
+        it records that manual/staff intervention is needed. See
+        `list_undispatched_confirmed_orders`."""
+
+    @abstractmethod
+    def list_undispatched_confirmed_orders(self, store_id: str) -> list[ConfirmedOrder]:
+        """Every confirmed order for this tenant with `dispatch_status !=
+        'DISPATCHED'` (PENDING or FAILED), oldest first — the staff/ops
+        visibility query T-049 FINAL requires: an order that never reached
+        the kitchen must be findable, not merely non-crashing."""
 
     # -- customer identity ----------------------------------------------------
 

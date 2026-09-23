@@ -159,19 +159,23 @@ class PostgresSessionRepository(SessionRepository):
                     f"already exists — confirmed orders are immutable (F12)."
                 ) from e
 
+    _CONFIRMED_COLUMNS = (
+        "store_id, order_id, call_id, customer_id, total_cents, ticket, "
+        "idempotency_key, EXTRACT(EPOCH FROM confirmed_at), session_json, "
+        "dispatch_status, EXTRACT(EPOCH FROM dispatched_at)"
+    )
+
     def get_confirmed_order(self, store_id: str, order_id: str) -> Optional[ConfirmedOrder]:
         return self._select_confirmed(
-            "SELECT store_id, order_id, call_id, customer_id, total_cents, ticket, "
-            "idempotency_key, EXTRACT(EPOCH FROM confirmed_at), session_json "
-            "FROM confirmed_orders WHERE store_id = %s AND order_id = %s",
+            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+            "WHERE store_id = %s AND order_id = %s",
             (store_id, order_id))
 
     def get_confirmed_order_by_idempotency_key(
         self, store_id: str, idempotency_key: str) -> Optional[ConfirmedOrder]:
         return self._select_confirmed(
-            "SELECT store_id, order_id, call_id, customer_id, total_cents, ticket, "
-            "idempotency_key, EXTRACT(EPOCH FROM confirmed_at), session_json "
-            "FROM confirmed_orders WHERE store_id = %s AND idempotency_key = %s",
+            f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+            "WHERE store_id = %s AND idempotency_key = %s",
             (store_id, idempotency_key))
 
     def _select_confirmed(self, query: str, params: tuple) -> Optional[ConfirmedOrder]:
@@ -184,6 +188,7 @@ class PostgresSessionRepository(SessionRepository):
             store_id=row[0], order_id=row[1], call_id=row[2], customer_id=row[3],
             total_cents=row[4], ticket=row[5], idempotency_key=row[6],
             confirmed_at=float(row[7]), session_snapshot=row[8],
+            dispatch_status=row[9], dispatched_at=float(row[10]) if row[10] is not None else None,
         )
 
     def finalize_session(self, session: Session, record: ConfirmedOrder) -> None:
@@ -224,6 +229,43 @@ class PostgresSessionRepository(SessionRepository):
                 (store_id, older_than_epoch),
             )
             return cur.rowcount
+
+    # -- dispatch status (T-049 FINAL) ---------------------------------------
+
+    def mark_order_dispatched(self, store_id: str, order_id: str, dispatched_at: float) -> None:
+        with self._conn, self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE confirmed_orders SET dispatch_status = 'DISPATCHED', "
+                "dispatched_at = to_timestamp(%s) WHERE store_id = %s AND order_id = %s",
+                (dispatched_at, store_id, order_id),
+            )
+
+    def mark_order_dispatch_failed(self, store_id: str, order_id: str) -> None:
+        with self._conn, self._conn.cursor() as cur:
+            cur.execute(
+                "UPDATE confirmed_orders SET dispatch_status = 'FAILED' "
+                "WHERE store_id = %s AND order_id = %s",
+                (store_id, order_id),
+            )
+
+    def list_undispatched_confirmed_orders(self, store_id: str) -> list[ConfirmedOrder]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "
+                "WHERE store_id = %s AND dispatch_status != 'DISPATCHED' "
+                "ORDER BY confirmed_at ASC",
+                (store_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            ConfirmedOrder(
+                store_id=r[0], order_id=r[1], call_id=r[2], customer_id=r[3],
+                total_cents=r[4], ticket=r[5], idempotency_key=r[6],
+                confirmed_at=float(r[7]), session_snapshot=r[8],
+                dispatch_status=r[9], dispatched_at=float(r[10]) if r[10] is not None else None,
+            )
+            for r in rows
+        ]
 
     # -- customer identity --------------------------------------------------
 

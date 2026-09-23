@@ -11,6 +11,7 @@ still serializes").
 
 from __future__ import annotations
 
+import dataclasses
 import time
 import uuid
 from typing import Optional
@@ -129,6 +130,28 @@ class InMemorySessionRepository(SessionRepository):
                 self._idempotency.pop((store_id, rec.idempotency_key), None)
         return len(doomed)
 
+    # -- dispatch status (T-049 FINAL) ---------------------------------------
+
+    def mark_order_dispatched(self, store_id: str, order_id: str, dispatched_at: float) -> None:
+        key = (store_id, order_id)
+        rec = self._confirmed.get(key)
+        if rec is None:
+            return
+        self._confirmed[key] = dataclasses.replace(
+            rec, dispatch_status="DISPATCHED", dispatched_at=dispatched_at)
+
+    def mark_order_dispatch_failed(self, store_id: str, order_id: str) -> None:
+        key = (store_id, order_id)
+        rec = self._confirmed.get(key)
+        if rec is None:
+            return
+        self._confirmed[key] = dataclasses.replace(rec, dispatch_status="FAILED")
+
+    def list_undispatched_confirmed_orders(self, store_id: str) -> list[ConfirmedOrder]:
+        rows = [rec for (sid, _), rec in self._confirmed.items()
+                if sid == store_id and rec.dispatch_status != "DISPATCHED"]
+        return sorted(rows, key=lambda r: r.confirmed_at)
+
     # -- customer identity --------------------------------------------------
 
     def get_or_create_customer(self, store_id: str, phone_normalized: str) -> str:
@@ -155,9 +178,8 @@ class InMemorySessionRepository(SessionRepository):
             self._session_customer.pop(key, None)
         for key, rec in list(self._confirmed.items()):
             if key[0] == store_id and rec.customer_id == customer_id:
-                self._confirmed[key] = ConfirmedOrder(
-                    store_id=rec.store_id, order_id=rec.order_id, call_id=rec.call_id,
-                    customer_id=None, total_cents=rec.total_cents, ticket=rec.ticket,
-                    idempotency_key=rec.idempotency_key, confirmed_at=rec.confirmed_at,
-                    session_snapshot=rec.session_snapshot,
-                )
+                # dataclasses.replace preserves dispatch_status/dispatched_at —
+                # a manual field-by-field reconstruction here would have
+                # silently reset an already-DISPATCHED order back to PENDING
+                # (T-049 FINAL: found while adding those fields, fixed here).
+                self._confirmed[key] = dataclasses.replace(rec, customer_id=None)

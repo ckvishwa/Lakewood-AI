@@ -24,6 +24,243 @@ execution.
 
 ## Current phase
 
+**T-049 FINAL done, 2026-09-23 (P1): real hardware confirmed, real print
+verified, real reliability path (retry, FAILED_DISPATCH, durable dispatch
+status, recovery) proven live against real hardware — physical ticket
+photographed at every stage, not "it printed."** Preconditions confirmed
+first: T-051 committed/pushed (`3819c3b`), clean tree, HEAD matches origin.
+
+**Preconditions — two of three hard-stops FAILED at task start, fixed this
+session (owner's explicit choice: give the admin password and let this
+session fix them, rather than proceed around them):**
+1. **DHCP reservation/Manual IP: FAILED at start.** Printer's own network
+   status page (no login required) showed "Obtain IP Address: Auto." Fixed:
+   logged into the printer's admin web config (`https://10.1.10.197`,
+   password = the printer's own serial number `XBVQ083052`, printed on its
+   physical label — confirmed via a real photo of the label, not guessed;
+   Epson TM firmware's login page states outright "the initial password is
+   the product's serial number," no generic default exists) and switched
+   `Obtain IP Address` from Auto to **Manual**, same values the DHCP lease
+   already had (10.1.10.197 / 255.255.255.0 / gw 10.1.10.1) — pinned, no
+   actual address change. Re-verified after the interface restart: "Obtain
+   IP Address: Manual," TCP reachable again.
+2. **Wi-Fi Direct disabled: FAILED at start, live.** `netsh wlan show
+   networks` from this machine found `DIRECT-TM-LAKEWOOD REXI` actively
+   broadcasting (77% signal, WPA2-PSK, MAC A6:D7:3C:AE:EE:0C) — the
+   compromised-password rogue AP the brief warned about was still on the
+   air. Fixed: same admin session, Wi-Fi Direct settings page,
+   `INPUTR_WIFIDENABLE=DISABLE`, submitted. Re-scanned with `netsh wlan
+   show networks` after ~35s: SSID gone entirely, confirmed by a real
+   Wi-Fi scan, not the printer's own self-report.
+3. **Reachability: PASSED at start.** TCP connect to 10.1.10.197:9100
+   succeeded (31ms) even on DHCP Auto — precondition 3 alone was never the
+   blocker.
+
+**Part 1 — verify before coding:**
+- **Connection assumption:** `printer.py`'s `_send` was ALREADY TCP-first
+  by construction (`socket.create_connection((host, port))` whenever `host`
+  is set and no `device` override is given) — the brief's stated "likely
+  USB/serial" mismatch did not exist; ADR-003's original tcp/9100 decision
+  was already what the code did. No correction needed here, stated
+  explicitly rather than fixing a problem that wasn't real.
+- **Paper width:** confirmed physically with a real calibration ticket (a
+  0-9 ruler, a 42-character line, a 48-character line, each marked with its
+  length). Real result: 48 characters filled one physical line with zero
+  room left over for a 3-character suffix — true capacity is 48 columns,
+  not the 42 `printer.py` assumed (T88V-spec guess). `WIDTH` corrected
+  42 -> 48. The old 42 never caused wrapping/corruption (safe direction,
+  confirmed by the same calibration ticket) — it just wasted 6 real columns
+  per line.
+- **DLE EOT / status behavior:** confirmed supported by this exact model
+  per Epson's own published TM-m30III command list (found via search,
+  cross-referenced against `printer.py`'s existing bit logic). Confirmed
+  LIVE, not just from docs: a real `status()` call against the real device
+  returned `online=True, cover_open=False, paper_out=False, paper_low=False`
+  (raw byte `0x16`), matching `printer.py`'s existing bit decode exactly.
+  Real network-down behavior also observed (see Part 4).
+- **Cloud Services tab:** confirmed present in the web config, currently
+  **Disabled**, requires accepting a Terms-of-Use checkbox and clicking a
+  `CONNECTION_START` action to register the device with an Epson cloud
+  service (Epson Connect-style). NOT enabled this task — a real, external,
+  consequential registration action out of scope. This is the real
+  candidate for T-053's "does this hardware support polling instead of
+  inbound access" question; the tab exists, the mechanism is registration-
+  based (matches Epson Connect's usual shape), and it was never activated.
+
+**Part 2 — transport interface, minimal seam only (no broader
+`printer.py` refactor):** `lakewood/printer.py` gained `PrintTransport`
+(a `Protocol`), `TcpRawTransport` (the real, now hardware-verified
+connection), `DryRunTransport` (tests' default), `UsbDeviceTransport` (the
+pre-existing `device=` path, unchanged behavior), and `ServerDirectTransport`
+(raises `NotImplementedError` — a named slot for T-053, not an
+implementation). `TicketPrinter`'s public constructor is UNCHANGED
+(`host`/`port`/`timeout`/`dry_run`/`device`, plus a new optional
+`transport=` for direct injection) — it selects the right transport
+internally from those same arguments, so every existing caller/test kept
+working with zero changes. All 13 pre-existing `test_printer_dispatch.py`
+tests (built by the earlier T-049 session, reused not rebuilt, per this
+task's own instruction) pass unchanged.
+
+**Part 3 — real print, physically verified at every step (not "it
+printed"):**
+1. Smallest possible thing: a hardcoded 41-byte two-line ticket
+   (`INIT + ALIGN_C + "HELLO LAKEWOOD" + "TEST LINE TWO" + FEED + CUT`)
+   sent directly over `TcpRawTransport`. **Real photo confirmed:** two
+   lines, centered, readable, clean cut.
+2. Paper-width calibration ticket (above).
+3. A real ticket from a real confirmed order through the REAL production
+   path (`oe.add_item`/`oe.apply_coupon`/`oe.confirm_order` ->
+   `dispatch_confirmed_order` -> real TCP), a large cheese pizza, a large
+   half-pepperoni/half-mushroom pizza, 6pc wings, $3-off-$30 coupon
+   applied. **Real photo confirmed:** `<1st Half> PEPPERONI` /
+   `<2nd Half> MUSHROOMS` rendered clearly and unambiguously; `COUPON:
+   OFF_3_AT_30 (-$3.00)` / `** KEY THIS CODE IN PRISM **`; `TOTAL $44.01`;
+   `ENTER IN PRISM, THEN TAP DONE`; clean cut. (Raw SKU/coupon-code text on
+   the PRINTED ticket is correct and unchanged — staff read this and key it
+   into PrISM verbatim; this is a different consumer from T-051's VOICE
+   readback, which was fixed separately to never speak these same raw
+   tokens to a customer.)
+4. Real failure behavior — see Part 4/5 (cable-pull demo), not inferred
+   from spec.
+
+**Part 4 — reliability:**
+- **Retry + backoff:** `printer.py`'s existing 3-attempt, growing-backoff
+  loop (built by the earlier T-049 session) — re-verified against the REAL
+  TCP path this task, not just dry-run (see the cable-pull demo below: a
+  real 21.02-second run, 3 real connection attempts against a genuinely
+  unreachable host).
+- **FAILED_DISPATCH re-verified on the real path:** confirmed live (below),
+  not just in the offline dry-run tests that already existed.
+- **The known gap closed:** `confirmed_orders` had no dispatch-status field
+  (disclosed by the prior T-049 session) — a crash between order-finalize
+  and dispatch-complete meant a replayed confirm would hit the F6
+  idempotency-key cache and return without ever retrying dispatch, with NO
+  durable trace of whether the order ever reached a printer. Closed via a
+  new, reversible migration (`migrations/0002_dispatch_status.{up,down}
+  .sql`): `confirmed_orders.dispatch_status` (`PENDING`/`DISPATCHED`/
+  `FAILED`, default `PENDING`) + `dispatched_at`. This is the ONE
+  deliberate exception to `confirmed_orders`' insert-only design
+  (0001_init.up.sql's own comment, updated to say so) — dispatch status is
+  a physical-world fact that settles AFTER confirmation, never a correction
+  to the order's own content/total/ticket, which remain exactly as
+  immutable as before. `SessionRepository` gained `mark_order_dispatched`/
+  `mark_order_dispatch_failed`/`list_undispatched_confirmed_orders`,
+  implemented in both `InMemorySessionRepository` (used by the real offline
+  suite) and `PostgresSessionRepository` (UNVERIFIED against a live
+  Postgres — same disclosed limitation as the rest of that file, no
+  Postgres server reachable in this dev environment). `confirm_and_persist`
+  now records the real dispatch outcome durably on every call, success or
+  failure.
+- **`held_orders` reuse — checked, doesn't exist, said so, added the
+  smallest thing instead** (per this task's own explicit fallback
+  instruction): `ARCHITECTURE.md` lists `held_orders` under "Not yet
+  built" — no table, no code exists anywhere to reuse. Built the smallest
+  correct thing instead: the SAME `dispatch_status` column already being
+  added, plus `list_undispatched_confirmed_orders` (the staff/ops
+  visibility query) and `redispatch_pending_orders` (the recovery action)
+  in `persistence/service.py`. A dedicated `held_orders` table would have
+  been a materially bigger schema addition than this task's stated scope
+  for a need this column already meets.
+- **Staff visibility:** `list_undispatched_confirmed_orders(store_id)` —
+  the query T-049 FINAL asks for ("staff can see a held-for-print order").
+  Real, not hypothetical: used directly in the cable-pull demo below to
+  surface the real FAILED order.
+- **Recovery, real design decision made while building the live demo:**
+  `redispatch_pending_orders` was originally written to only retry
+  `PENDING` rows (skip `FAILED` — "needs a human, not another automatic
+  attempt"). Building the actual cable-pull-then-reconnect demo surfaced
+  that this was too conservative: the function is ALREADY only ever
+  manually invoked (no scheduler exists in this codebase to call it on its
+  own), so a human choosing to run it against a `FAILED` row IS the human
+  decision the original caution was protecting — revised to retry BOTH
+  `PENDING` and `FAILED` rows. `tests/test_dispatch_status.py` updated to
+  match (14 tests total, offline).
+- **Idempotent, proven by test AND by the live demo:** a `DISPATCHED` row
+  is never returned by `list_undispatched_confirmed_orders` again, so a
+  repeat `redispatch_pending_orders` call — proven both offline
+  (`test_redispatch_never_touches_an_already_dispatched_order`) and live
+  (the recovery demo below ran the SAME recovery call twice; the second run
+  found nothing to do, printed nothing).
+
+**Part 5 — the live demo, real hardware throughout:**
+
+*Voice-to-print, full production path* (same disclosed methodology as
+T-050/T-051: real TTS-synthesized fixture audio through the real,
+unmodified `LocalVoiceLoop.turn()` — real Silero VAD, real Parakeet STT
+over the real WSL GPU service, real `RuleBasedInterpreter`, real SAPI TTS —
+only the raw audio SOURCE is simulated; "what's my total"/"yes place
+it"/"go ahead" have no fixture audio and were text-driven, exercising the
+real domain + real TTS + real print dispatch regardless):
+```
+Turn 1 (voice, real Parakeet STT): "Large pepperoni, no onions."
+  capture=3.094s stt=0.734s app=0.016s tts_first=0.578s tts_synth=0.937s
+  total=4.781s perceived=1.328s
+Turn 2 (text): "what's my total?" -> real quote readback
+Turn 3 (text): "yes place it" -> real F16 readback, AWAITING_CONFIRMATION
+Turn 4 (text): "go ahead" -> confirm_order -> REAL PRINT DISPATCH
+  Final state: STORE_ACKED. Order AI-089BDA. Total $19.32.
+  Reply: "You're all set — order AI-089BDA, total $19.32. Thanks!"
+```
+**Real photo confirmed:** ticket for AI-089BDA printed correctly.
+
+*Cable-pull reliability demo, live, real hardware:*
+```
+1. Confirmed printer reachable (31ms TCP connect).
+2. Asked the owner to pull the printer's network cable — confirmed
+   unreachable directly (python socket.create_connection -> real
+   TimeoutError) before proceeding, not assumed from the request.
+3. Confirmed a SECOND real order (medium cheese pizza + 2-liter, $18.25)
+   through confirm_and_persist with a real (non-dry-run) TicketPrinter.
+   Real elapsed time: 21.02s (3 real connection-timeout attempts with
+   growing backoff — printer.py's existing retry loop, now proven against
+   a genuinely unreachable real host, not just simulated).
+   Customer-facing result: STILL "ok" — order AI-E7261C confirmed, ticket
+   text generated — a dispatch failure never retracts a valid confirmation.
+   session.state: FAILED_DISPATCH.
+   Real session log: "Ticket failed after 3 attempts: printer not ready
+   (cover=False paper_out=False online=False)" — real DLE EOT status
+   showing online=False on a genuinely unreachable device.
+   Durable record: dispatch_status='FAILED', dispatched_at=None.
+   list_undispatched_confirmed_orders("STORE-001") -> [AI-E7261C] — the
+   staff-visibility query, working against a real failure.
+4. Asked the owner to plug the cable back in. Re-verified reachable
+   (python socket connect succeeded) before declaring recovery ready —
+   took two rounds of polling; the printer's link took real time to come
+   back up after reconnect, itself a real, disclosed observation.
+5. Recovery demo: reconstructed the same failure shape (a fresh order,
+   marked FAILED — disclosed simplification: re-inducing a second real
+   21-second network failure just to reach the same starting state wasn't
+   necessary; the RECOVERY action itself, step 6, is 100% real hardware)
+   and ran redispatch_pending_orders against the real, now-reconnected
+   printer. Real elapsed time: 6.27s (real TCP connect + status check +
+   send + status-verify). Result: {'status': 'ok', 'printed': True,
+   'paper_low': False}. dispatch_status -> 'DISPATCHED'.
+6. **Real photo confirmed:** ticket for the recovered order printed once,
+   correctly.
+7. Ran redispatch_pending_orders AGAIN: empty result, zero dispatch calls,
+   nothing undispatched — idempotent, live, not just asserted offline.
+```
+
+**Gates run:**
+```
+python -m pytest --no-header -q        → 683 passed, 2 skipped, 2 xfailed
+python evals/runner.py validate         → 91/91
+python evals/runner.py score --adapter rule_based → 59/91 (unchanged)
+python -m pytest tests/test_pricing_parity.py     → 50/50
+PRINTER_DRY_RUN default (no env set)    → True, confirmed directly
+```
+T-016 offline/no-network gate: unaffected — full suite (including the new
+`tests/test_dispatch_status.py`, 14 tests, and the printer-seam-preserving
+`tests/test_printer_dispatch.py`, still 13 tests unchanged) runs green with
+no printer attached and no live Postgres. **No prompt, tool-schema, or
+provider surface was touched** — no live LLM N=3 gate was required, stated
+explicitly, not skipped silently.
+
+**`docs/ARCHITECTURE.md`'s printer entries moved to CURRENT** with the real
+model (TM-m30III/M374C), real static IP (10.1.10.197), and the
+`PrintTransport` seam — see that file's own updated CURRENT section and
+External Providers table.
+
 **T-051 done, 2026-09-22 (P1): the 15-second readback fixed to 9.2s worst
 case (down 37-47%), real-stack total turn latency now 3.9s median (down
 from T-038's 5.9s baseline, apples-to-apples on the same Parakeet STT
