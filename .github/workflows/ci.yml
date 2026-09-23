@@ -48,6 +48,16 @@ jobs:
   secret-scan:
     name: Secret scanning (gitleaks, full history)
     runs-on: ubuntu-latest
+    # T-058: on a pull_request trigger, gitleaks-action's PR-diff mode calls
+    # GET /repos/.../pulls/{n}/commits to enumerate the PR's own commits —
+    # the workflow-level `contents: read` alone doesn't cover that; a
+    # private repo's default GITHUB_TOKEN is more restrictive than a public
+    # one, and the job failed with "Resource not accessible by integration"
+    # until this was added (confirmed via a real PR run, not just a YAML
+    # read — see docs/STATUS.md's T-058 entry).
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@v4
         with:

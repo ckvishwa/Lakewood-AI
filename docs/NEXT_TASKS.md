@@ -2,6 +2,54 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## Standing rule (added by T-058, 2026-09-23)
+
+**Any test exercising code with a real-time/environment dependency
+(`datetime.now()`, `time.time()`, timezone, hostname, real network
+reachability, etc.) must pin that dependency explicitly** — via
+monkeypatch, an injected `now`, or an equivalent seam — never rely on
+"passes locally" as evidence of hermeticity. It's only evidence of what
+the local clock/environment happened to be. T-058's own root cause: ten
+tests assumed an in-hours store without ever forcing it, passed on every
+local run by coincidence, and failed the moment CI's UTC clock landed on
+a different hour relative to `HOURS`. `tests/conftest.py`'s
+`open_store`/`closed_store` fixtures are the reusable pattern for this
+specific dependency; the general rule applies to any future one.
+
+**Any task touching order/dispatch state must grep for every existing
+state-value usage first** (`Session.state`, `dispatch_status`, and any
+future state field) — `grep -rn '"HELD_FOR_OPEN"\|"DISPATCHED"\|"FAILED_DISPATCH"\|"STORE_ACKED"\|dispatch_status'
+lakewood/ tests/` before adding or changing a transition — not because
+two sessions actually collided this time (they didn't; see T-058's own
+diagnosis — this rule is filed as a genuine process improvement even
+though the specific incident that prompted it turned out to have a
+different, simpler root cause), but because a real state-machine
+collision is a plausible enough failure mode for this project to guard
+against deliberately, not just get lucky about.
+
+## T-058 · Fix `main` — CI permissions + dispatch-status "state collision" — **DONE, 2026-09-23**
+
+**Priority:** 0 · **Status:** Done. Full diagnosis in `docs/STATUS.md`'s
+own T-058 entry (not repeated here in full).
+
+`main` was red after T-054..T-057 merged. Two independent problems, both
+closed: (1) `gitleaks-action`'s PR-diff mode needs `pull-requests: read`
+on a private repo's default token — added, verified against a real PR.
+(2) Ten tests failed because they never pinned `orders.store_status()`
+and silently depended on real wall-clock time vs. the store's `HOURS` —
+**not** a two-session state-machine collision as first hypothesized;
+`HELD_FOR_OPEN` was already correct, already-documented behavior. Fixed
+by pinning the precondition (`tests/conftest.py`'s new
+`open_store`/`closed_store` fixtures), not by changing any expected
+value. Two new boundary-pinning regression tests added. Also found and
+fixed: `.tmp/` was only indirectly gitignored (a non-`.log`/`.wav`
+scratch file could have been swept into a commit — confirmed three real
+un-ignored files this session). Branch protection is now unavailable
+(repo went private, 403 without GitHub Pro) — flagged as an open risk in
+`docs/SECURITY_AUDIT_T054.md`, not silently worked around. Full suite
+709 passed/2 skipped/2 xfailed, `validate` 91/91, ratchet 59/91, parity
+50/50 — zero regressions.
+
 ## T-054 · Security + CI audit — **DONE, 2026-09-23**
 
 **Priority:** 0 · **Status:** Done. Full report: `docs/SECURITY_AUDIT_T054.md`.

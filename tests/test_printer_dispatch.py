@@ -79,7 +79,7 @@ class _RecordingPrinter(TicketPrinter):
         return super()._send(payload, expect_reply)
 
 
-def test_confirmed_order_dispatches_once_and_prints_real_content():
+def test_confirmed_order_dispatches_once_and_prints_real_content(open_store):
     sess = _confirmed_session()
     printer = _RecordingPrinter(dry_run=True)
     result = dispatch_confirmed_order(sess, printer)
@@ -90,7 +90,7 @@ def test_confirmed_order_dispatches_once_and_prints_real_content():
     assert any(e["event"] == "printed" for e in sess.events)
 
 
-def test_dispatch_is_not_re_entrant_on_an_already_dispatched_session():
+def test_dispatch_is_not_re_entrant_on_an_already_dispatched_session(open_store):
     """A confirmed order that already dispatched must refuse a second
     attempt through this same function — the state guard IS the one-ticket
     guarantee at this layer (confirm_and_persist's idempotency-key cache is
@@ -107,7 +107,7 @@ def test_dispatch_is_not_re_entrant_on_an_already_dispatched_session():
     assert printer.last_output == first_output
 
 
-def test_print_failure_moves_to_failed_dispatch_never_store_acked(monkeypatch):
+def test_print_failure_moves_to_failed_dispatch_never_store_acked(monkeypatch, open_store):
     sess = _confirmed_session()
     printer = _AlwaysOfflinePrinter(dry_run=True)
     monkeypatch.setattr("lakewood.printer.time.sleep", lambda s: None)  # keep the test fast
@@ -122,12 +122,9 @@ def test_print_failure_moves_to_failed_dispatch_never_store_acked(monkeypatch):
     assert any(e["event"] == "dispatch_failed" for e in sess.events)
 
 
-def test_after_hours_confirmed_order_is_held_not_printed(monkeypatch):
+def test_after_hours_confirmed_order_is_held_not_printed(closed_store):
     sess = _confirmed_session()
     printer = TicketPrinter(dry_run=True)
-    monkeypatch.setattr(
-        "lakewood.orders.store_status",
-        lambda: {"open": False, "next_open": "10 AM", "next_open_iso": "2026-09-23T10:00:00"})
 
     result = dispatch_confirmed_order(sess, printer)
 
@@ -138,10 +135,40 @@ def test_after_hours_confirmed_order_is_held_not_printed(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# T-058: the open/closed boundary itself, pinned explicitly. This is the
+# exact seam that broke silently (nine tests assumed "in-hours" without
+# ever forcing it, so they passed or failed purely by coincidence of real
+# wall-clock time vs. HOURS — see docs/STATUS.md's T-058 entry). Pinning
+# both directions here makes that seam impossible to break silently again.
+# ---------------------------------------------------------------------------
+
+def test_in_hours_confirmed_order_never_lands_in_held_for_open(open_store):
+    sess = _confirmed_session()
+    printer = TicketPrinter(dry_run=True)
+
+    result = dispatch_confirmed_order(sess, printer)
+
+    assert result.get("held") is not True
+    assert sess.state != "HELD_FOR_OPEN"
+    assert sess.state == "STORE_ACKED"
+
+
+def test_after_hours_confirmed_order_never_lands_in_dispatched(closed_store):
+    sess = _confirmed_session()
+    printer = TicketPrinter(dry_run=True)
+
+    result = dispatch_confirmed_order(sess, printer)
+
+    assert result.get("printed") is not True
+    assert sess.state != "STORE_ACKED"
+    assert sess.state == "HELD_FOR_OPEN"
+
+
+# ---------------------------------------------------------------------------
 # confirm_and_persist — the real PersistentChat funnel, replay safety
 # ---------------------------------------------------------------------------
 
-def test_confirm_and_persist_dispatches_exactly_once_across_a_replay():
+def test_confirm_and_persist_dispatches_exactly_once_across_a_replay(open_store):
     """T-049 acceptance: 'one confirmed order, one ticket, proven by test.'
     Simulates the crash-and-retry case F6/confirm_and_persist already
     guarantee at the persistence layer: the SAME idempotency_key is
@@ -180,7 +207,7 @@ def test_confirm_and_persist_dispatches_exactly_once_across_a_replay():
     assert len(dispatch_calls) == 1  # still exactly one
 
 
-def test_dispatch_failure_does_not_leak_into_the_customer_facing_confirm_result(monkeypatch):
+def test_dispatch_failure_does_not_leak_into_the_customer_facing_confirm_result(monkeypatch, open_store):
     """The customer's confirmation is real regardless of what happens in the
     kitchen — a dispatch failure must not turn confirm_order's result into
     an error the customer hears (that would contradict CLAUDE.md's 'printer
@@ -202,7 +229,7 @@ def test_dispatch_failure_does_not_leak_into_the_customer_facing_confirm_result(
     assert sess.state == "FAILED_DISPATCH"  # the real, staff-facing state
 
 
-def test_run_turn_confirm_order_reply_unaffected_by_a_failed_dispatch(monkeypatch):
+def test_run_turn_confirm_order_reply_unaffected_by_a_failed_dispatch(monkeypatch, open_store):
     """End-to-end through the real text turn path: the spoken reply stays
     the normal confirmation, never a printer error string."""
     monkeypatch.setattr("lakewood.printer.time.sleep", lambda s: None)

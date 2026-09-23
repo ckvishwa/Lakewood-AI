@@ -124,7 +124,7 @@ def test_delete_customer_does_not_reset_dispatch_status_to_pending():
 # confirm_and_persist wiring: real dispatch outcome recorded durably
 # ---------------------------------------------------------------------------
 
-def test_successful_dispatch_marks_the_order_dispatched():
+def test_successful_dispatch_marks_the_order_dispatched(open_store):
     repo = InMemorySessionRepository()
     sess = oe.Session(call_id="C1", store_id="STORE-001", from_number="+12035551234")
     oe.set_order_type(sess, "pickup")
@@ -145,7 +145,7 @@ class _AlwaysOfflinePrinter(TicketPrinter):
         return PrinterStatus(online=False, cover_open=False, paper_out=False, paper_low=False)
 
 
-def test_failed_dispatch_marks_the_order_failed_not_silently_pending(monkeypatch):
+def test_failed_dispatch_marks_the_order_failed_not_silently_pending(monkeypatch, open_store):
     monkeypatch.setattr("lakewood.printer.time.sleep", lambda s: None)
     repo = InMemorySessionRepository()
     sess = oe.Session(call_id="C1", store_id="STORE-001", from_number="+12035551234")
@@ -178,7 +178,7 @@ class _CountingPrinter(TicketPrinter):
         return super().dispatch(payload, retries=retries, backoff=backoff)
 
 
-def test_redispatch_recovers_an_order_stuck_pending_by_a_simulated_crash():
+def test_redispatch_recovers_an_order_stuck_pending_by_a_simulated_crash(open_store):
     """Simulates the exact gap: an order finalized (in confirmed_orders,
     dispatch_status=PENDING) but the process 'crashed' before dispatch ever
     ran — no printer was passed to confirm_and_persist at all. A later,
@@ -223,7 +223,7 @@ def test_redispatch_never_touches_an_already_dispatched_order():
     assert printer.dispatch_calls == 0
 
 
-def test_redispatch_retries_a_failed_order_when_explicitly_invoked():
+def test_redispatch_retries_a_failed_order_when_explicitly_invoked(open_store):
     """T-049 FINAL's real cable-pull demo: an order that failed to dispatch
     (network down) must be retriable once a human fixes the underlying
     problem and explicitly triggers recovery — redispatch_pending_orders
