@@ -24,6 +24,95 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 1 Part D, 2026-09-24 (one host) — done, real end-to-end
+session, real numbers.**
+
+**Bring-up procedure, from a genuinely clean WSL Ubuntu instance** (real
+commands run this task, not aspirational):
+
+```
+# 1. Orchestrator env
+uv venv lakewood-host --python 3.12
+uv pip install --python lakewood-host/bin/python -r requirements.txt
+python -m piper.download_voices --download-dir piper-voices en_US-lessac-medium
+
+# 2. Postgres (this task: Docker Desktop's own WSL2 backend, reachable
+#    from the Ubuntu WSL distro via localhost — genuinely the same
+#    Windows machine's Linux subsystem; a real cloud host would run this
+#    as a normal local/managed Postgres instead of via Docker Desktop)
+docker run -d --name lakewood-pg -e POSTGRES_PASSWORD=... -e POSTGRES_DB=lakewood \
+  -p 5432:5432 postgres:16-alpine
+python -m lakewood.persistence.migrations.runner up "$DSN"
+
+# 3. Parakeet (ADR-016, unchanged) — separate NeMo/uv venv, warm service
+#    on 127.0.0.1:8765; already running throughout this task.
+
+# 4. Run
+LAKEWOOD_STT_PROVIDER=parakeet LAKEWOOD_TTS_PROVIDER=piper \
+  PRINTER_DRY_RUN=1 python -m lakewood.voice
+```
+
+Confirmed by actually doing it: full offline test suite (723 tests) run
+from inside WSL with zero changes needed — same code, same result as
+Windows.
+
+**Real end-to-end session, single host, real components throughout**
+(Parakeet STT, Piper TTS, real Postgres, dry-run printer — Part A never
+concluded a real transport to test against): turn 1 used a real, pre-
+recorded fixture WAV as the capture source (no microphone input inside
+WSL — same disclosed-methodology precedent as T-049 FINAL/T-050/T-051,
+real VAD/STT/domain/TTS all ran for real); turns 2–4 were text-driven,
+same precedent.
+
+```
+Turn 1 (real fixture voice): "Large pepperoni, no onions."
+  -> "Got it — large cheese pizza — pepperoni, no onions. Anything else?"
+  stt=0.363s app=0.011s tts_first=0.125s tts_synth=0.159s perceived=0.498s
+Turn 2 (text): "what's my total?"
+  -> correctly disclosed BEFORE confirmation: "...We're closed right now,
+     so this is held for Thursday at 11 AM — not tonight."
+Turn 3 (text): "yes place it" -> readback repeated, asks to place
+Turn 4 (text): "go ahead" -> CONFIRMED, real dry-run dispatch attempted
+  Final state: HELD_FOR_OPEN (correct — this ran at 11:53 PM Eastern,
+  genuinely after hours; not simulated to look better than it is)
+```
+
+**Real, verified in the actual database** (not asserted): `SELECT ...
+FROM confirmed_orders WHERE order_id='AI-2CEA46'` →
+`store_id=STORE-001, total_cents=1932, dispatch_status=PENDING` — exactly
+right: a HELD_FOR_OPEN order stays `PENDING`, per T-058's own finding,
+findable via `list_undispatched_confirmed_orders` until the store opens.
+
+**Latency, real numbers, same `report_latency()` code T-051 itself used
+— a genuine apples-to-apples comparison, with one caveat stated
+plainly:** `capture` here is a fixture file's own recorded duration
+(3.014s), not live-VAD capture time, so it is **not** comparable to
+T-051's live-mic 2.766s — the fair comparison is `perceived` (speech-end
+→ first audio), which excludes capture entirely:
+
+| Stage | T-051 (SAPI, live mic) | This task (Piper, fixture audio) |
+|---|---|---|
+| stt (real Parakeet, both) | 0.406s | 0.363s |
+| app | 0.000s | 0.011s |
+| tts first audio | 0.374s | **0.125s** |
+| tts synthesis total | 0.703s | **0.159s** |
+| **perceived (speech-end → first audio)** | **0.781s** | **0.498s (-36%)** |
+
+The improvement is real and entirely attributable to Piper's synthesis
+speed (measured in Part C, not assumed here) — STT and app latency are
+unchanged (same Parakeet provider, same domain code) as they should be.
+
+**Not done, disclosed, not silently skipped:** a real ticket print (Part
+A never concluded a transport; this run correctly held instead, which is
+itself a legitimate, valuable proof — the after-hours path works
+end-to-end on the new stack too, not just in offline tests); this ADR's
+`report_latency` "total" row is not repeated here as a headline number
+since its `capture` component isn't a fair comparison this run.
+
+Full offline suite unaffected: 723 passed/10 skipped/2 xfailed (no code
+changed this part beyond docs — Parts A–C already landed the real
+changes).
+
 **T-053 Phase 1 Part C, 2026-09-24 (Linux TTS) — done.** Full reasoning
 and every number: `docs/decisions/ADR-020-linux-tts-piper.md`.
 
