@@ -42,6 +42,13 @@ psycopg2-binary>=2.9   # Postgres driver for real persistence
 # Optional — local push-to-talk capture only; lazy-imported by lakewood.voice.
 sounddevice>=0.4       # microphone adapter; no audio hardware required by tests
 
+# Optional — T-053 Phase 2 Part 1 (ADR-021): Twilio's own maintained
+# `RequestValidator`, used to check X-Twilio-Signature on every inbound
+# telephony webhook. Lazy-imported inside
+# `lakewood/telephony/webhook_auth.py`; no core domain file imports it,
+# same optional-dependency pattern as psycopg2-binary/piper-tts below.
+twilio>=9.0
+
 # Optional — LAKEWOOD_TTS_PROVIDER=piper (T-053 Phase 1 Part C): the
 # Linux-deployable production TTS provider (ADR-020). ONNX/CPU only, no
 # torch, no GPU contention with Parakeet. Windows SAPI stays the dev
