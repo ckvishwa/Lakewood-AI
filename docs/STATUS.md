@@ -24,6 +24,55 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 1 Part A+B, 2026-09-24.** Part A (Server Direct Print):
+**BLOCKED** — the dev machine is currently on a different network
+(10.0.0.51) than the printer's restaurant LAN (10.1.10.x); TCP 9100/443/80
+to 10.1.10.197 all time out. Cannot test SDP or print anything real from
+here. ADR-019's recommendation (self-built relay, not Epson Cloud
+Services) stands unchanged and unamended — revisit when the dev machine
+is back on that LAN.
+
+**Part B (real Postgres) — done, and it found two real, reproducible
+production bugs the in-memory repository structurally could never show:**
+
+1. **Idle-in-transaction deadlock.** `PostgresSessionRepository`'s five
+   read-only methods (`load_session`, `find_active_session_by_phone`,
+   `session_last_updated`, `_select_confirmed`, `list_undispatched_
+   confirmed_orders`) never committed or rolled back — `autocommit=False`
+   means a bare SELECT with no enclosing `with self._conn:` leaves the
+   connection idle-in-transaction indefinitely. Reproduced live, twice,
+   not theoretical: a stuck read blocked a later `TRUNCATE` in a test
+   fixture, confirmed via `pg_stat_activity`. Fixed — every read method
+   now wraps in `with self._conn:` like every write method already did.
+2. **Unguarded check-then-insert race in `get_or_create_customer`.** SELECT
+   for an existing customer, then INSERT if none found, with no
+   transactional guard — two concurrent callers for the SAME phone number
+   (a customer calling twice quickly, or two related sessions) can both
+   pass the SELECT before either commits, and the loser's INSERT throws
+   an unhandled `UniqueViolation`, crashing `save_session`. Reproduced
+   live with real threads against a real server. Fixed with an atomic
+   `INSERT ... ON CONFLICT DO NOTHING RETURNING`, reading back the
+   winner's row on conflict instead of raising.
+
+**Verified, all live, not from documentation:** migrations up AND down
+(twice, from a clean schema) on a real Postgres 16 container; every
+timestamp column across all 5 tables confirmed `timestamp with time zone`
+via `\d`, not read from SQL; the existing 4-test contract suite; the full
+7-test tenant-isolation suite now parametrized to run against BOTH
+`InMemorySessionRepository` (always) and `PostgresSessionRepository`
+(when `LAKEWOOD_POSTGRES_TEST_DSN` is set) — 13 tests total, all green
+against the real server; two new concurrency tests with real threads and
+separate connections (concurrent same-call writes never deadlock or
+corrupt; a confirm replay racing a dispatch under a genuine race still
+lets exactly one win and the other see `ConfirmedOrderExists`, proving F6
+under real transactions, not just sequential test order). New CI job
+`postgres-contract` runs all of this against a real Postgres service
+container, kept fully separate from the offline gate.
+
+Full offline suite unaffected: 717 passed/10 skipped (8 newly-added
+Postgres-gated params skip cleanly without a DSN)/2 xfailed, `validate`
+91/91, ratchet 59/91, parity 50/50.
+
 **T-059 done, 2026-09-23 (P0): store hours were timezone-naive — the
 real bug behind T-058's CI failure, not just a test-determinism gap.**
 
