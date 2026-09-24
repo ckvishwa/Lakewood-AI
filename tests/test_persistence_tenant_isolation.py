@@ -4,12 +4,19 @@ apply in a query. T-037 acceptance criteria: "cross-tenant read structurally
 impossible; a test proves it" and "tenant key unsettable by any tool, model
 output, or client input; test proves it."
 
-These tests use two DIFFERENT store_ids against the SAME repository instance
-(`InMemorySessionRepository` — the one the offline gate actually runs). A
-real second store doesn't exist yet (single design partner, ADR-014), but the
-repository API takes `store_id` as an explicit parameter everywhere
+These tests use two DIFFERENT store_ids against the SAME repository instance.
+A real second store doesn't exist yet (single design partner, ADR-014), but
+the repository API takes `store_id` as an explicit parameter everywhere
 specifically so this is testable today without one.
+
+T-053 Phase 1 (Part B): every `repo`-parametrized test here now runs against
+BOTH `InMemorySessionRepository` (unconditional — the one the T-016 offline
+gate actually runs) AND `PostgresSessionRepository` (only when
+`LAKEWOOD_POSTGRES_TEST_DSN` is set) — proving the SAME tenant-isolation
+guarantee holds against the real adapter, not only the in-memory one.
 """
+
+import os
 
 import pytest
 
@@ -18,10 +25,55 @@ from lakewood.orders import add_item, set_order_type
 from lakewood.persistence.memory_repository import InMemorySessionRepository
 from lakewood.persistence.repository import ConfirmedOrder
 
+DSN = os.environ.get("LAKEWOOD_POSTGRES_TEST_DSN")
 
-@pytest.fixture
-def repo():
-    return InMemorySessionRepository()
+
+def _seed_second_store(dsn: str) -> None:
+    """The migration runner only seeds the single configured store
+    (STORE-001) — these tests need a real second tenant row to INSERT
+    STORE-002 rows against without violating the `stores` foreign key."""
+    import psycopg2
+    conn = psycopg2.connect(dsn)
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO stores (store_id, name, inbound_did) VALUES (%s, %s, %s) "
+                "ON CONFLICT (store_id) DO NOTHING",
+                ("STORE-002", "Test Second Store", "+10000000000"))
+    finally:
+        conn.close()
+
+
+@pytest.fixture(params=[
+    pytest.param("memory", id="memory"),
+    pytest.param("postgres", id="postgres",
+                marks=pytest.mark.skipif(
+                    not DSN, reason="LAKEWOOD_POSTGRES_TEST_DSN not set — no live Postgres")),
+])
+def repo(request):
+    if request.param == "memory":
+        yield InMemorySessionRepository()
+        return
+
+    from lakewood.persistence.migrations.runner import migrate_up
+    from lakewood.persistence.postgres_repository import PostgresSessionRepository
+
+    migrate_up(DSN)
+    _seed_second_store(DSN)
+    r = PostgresSessionRepository(DSN)
+    try:
+        yield r
+    finally:
+        # Real-Postgres tests must start each test as isolated as a fresh
+        # InMemorySessionRepository() does — truncate the tenant-scoped
+        # tables (never `stores`, which both tenant rows live in across
+        # the whole run) after every test.
+        import psycopg2
+        conn = psycopg2.connect(DSN)
+        with conn, conn.cursor() as cur:
+            cur.execute("TRUNCATE sessions, confirmed_orders, customers CASCADE")
+        conn.close()
+        r.close()
 
 
 def _session(store_id: str, call_id: str, phone: str = "+12035551234") -> oe.Session:

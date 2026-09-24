@@ -81,7 +81,15 @@ class PostgresSessionRepository(SessionRepository):
             )
 
     def load_session(self, store_id: str, call_id: str) -> Optional[Session]:
-        with self._conn.cursor() as cur:
+        # T-053 Phase 1 Part B: `with self._conn` closes the transaction a
+        # SELECT still opens under autocommit=False — without it, this
+        # connection sits "idle in transaction" indefinitely after any
+        # read with no write to close it. Found live, against a real
+        # server, via a genuine deadlock (a stuck idle-in-transaction read
+        # blocked a subsequent TRUNCATE) — the in-memory repository cannot
+        # show this class of bug at all. Every write method here already
+        # does this; every read method now does too.
+        with self._conn, self._conn.cursor() as cur:
             cur.execute(
                 "SELECT session_json FROM sessions WHERE store_id = %s AND call_id = %s",
                 (store_id, call_id),
@@ -101,7 +109,7 @@ class PostgresSessionRepository(SessionRepository):
     def find_active_session_by_phone(self, store_id: str, from_number: str) -> Optional[Session]:
         phone = normalize_phone(from_number)
         terminal = tuple(TERMINAL)
-        with self._conn.cursor() as cur:
+        with self._conn, self._conn.cursor() as cur:
             cur.execute(
                 """
                 SELECT s.session_json FROM sessions s
@@ -119,7 +127,7 @@ class PostgresSessionRepository(SessionRepository):
         return session_from_dict(row[0])
 
     def session_last_updated(self, store_id: str, call_id: str) -> Optional[float]:
-        with self._conn.cursor() as cur:
+        with self._conn, self._conn.cursor() as cur:
             cur.execute(
                 "SELECT EXTRACT(EPOCH FROM updated_at) FROM sessions "
                 "WHERE store_id = %s AND call_id = %s",
@@ -179,7 +187,7 @@ class PostgresSessionRepository(SessionRepository):
             (store_id, idempotency_key))
 
     def _select_confirmed(self, query: str, params: tuple) -> Optional[ConfirmedOrder]:
-        with self._conn.cursor() as cur:
+        with self._conn, self._conn.cursor() as cur:
             cur.execute(query, params)
             row = cur.fetchone()
         if row is None:
@@ -249,7 +257,7 @@ class PostgresSessionRepository(SessionRepository):
             )
 
     def list_undispatched_confirmed_orders(self, store_id: str) -> list[ConfirmedOrder]:
-        with self._conn.cursor() as cur:
+        with self._conn, self._conn.cursor() as cur:
             cur.execute(
                 f"SELECT {self._CONFIRMED_COLUMNS} FROM confirmed_orders "  # nosec B608 -- f-string is a fixed constant (_CONFIRMED_COLUMNS), never request data; all values parameterized via %s
                 "WHERE store_id = %s AND dispatch_status != 'DISPATCHED' "
@@ -270,21 +278,35 @@ class PostgresSessionRepository(SessionRepository):
     # -- customer identity --------------------------------------------------
 
     def get_or_create_customer(self, store_id: str, phone_normalized: str) -> str:
+        # T-053 Phase 1 Part B.5: the previous SELECT-then-INSERT shape was
+        # a real check-then-act race — found live, under real concurrent
+        # threads against real Postgres, not theoretical: two connections
+        # for the same phone number both pass the SELECT (finding nothing)
+        # before either commits, then the second INSERT hits the unique
+        # constraint on (store_id, phone_normalized) as an UNHANDLED
+        # UniqueViolation, crashing save_session for that caller. A real
+        # customer calling twice in quick succession is exactly this
+        # shape. INSERT...ON CONFLICT DO NOTHING RETURNING is atomic: this
+        # caller either wins and gets its own new row back, or loses and
+        # reads back whichever row the winner actually inserted — no
+        # exception either way.
         with self._conn, self._conn.cursor() as cur:
+            customer_id = f"CUST-{uuid.uuid4().hex[:12].upper()}"
             cur.execute(
-                "SELECT customer_id FROM customers WHERE store_id = %s AND phone_normalized = %s",
-                (store_id, phone_normalized),
+                "INSERT INTO customers (store_id, customer_id, phone_normalized, created_at) "
+                "VALUES (%s, %s, %s, now()) "
+                "ON CONFLICT (store_id, phone_normalized) DO NOTHING "
+                "RETURNING customer_id",
+                (store_id, customer_id, phone_normalized),
             )
             row = cur.fetchone()
             if row:
                 return row[0]
-            customer_id = f"CUST-{uuid.uuid4().hex[:12].upper()}"
             cur.execute(
-                "INSERT INTO customers (store_id, customer_id, phone_normalized, created_at) "
-                "VALUES (%s, %s, %s, now())",
-                (store_id, customer_id, phone_normalized),
+                "SELECT customer_id FROM customers WHERE store_id = %s AND phone_normalized = %s",
+                (store_id, phone_normalized),
             )
-            return customer_id
+            return cur.fetchone()[0]
 
     def delete_customer(self, store_id: str, customer_id: str) -> None:
         with self._conn, self._conn.cursor() as cur:

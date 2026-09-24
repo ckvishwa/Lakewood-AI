@@ -2,6 +2,35 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 1 Part A · Server Direct Print — **BLOCKED, 2026-09-24**
+
+**Priority:** 2 · **Status:** Blocked on physical LAN access. Dev machine
+is on 10.0.0.51 (Wi-Fi), printer LAN is 10.1.10.x — TCP 9100/443/80 to
+10.1.10.197 all time out. Cannot test SDP, log into the printer's Cloud
+Services tab, or print a real ticket from here. ADR-019's recommendation
+(self-built relay, not Epson Cloud Services) stands unamended. Revisit
+when the dev machine is back on the restaurant LAN.
+
+## T-053 Phase 1 Part B · Real Postgres — **DONE, 2026-09-24, found 2 real concurrency bugs**
+
+**Priority:** 0 · **Status:** Done. Full diagnosis in `docs/STATUS.md`'s
+T-053 Phase 1 entry.
+
+Stood up Postgres 16 in Docker, ran migrations up/down twice from a
+clean schema (real reversibility, not read from SQL), confirmed every
+timestamp column is `timestamptz` live via `\d`. Found and fixed two
+real production bugs the in-memory repository structurally cannot show:
+an idle-in-transaction deadlock (5 read-only methods in
+`PostgresSessionRepository` never committed/rolled back under
+`autocommit=False`) and an unguarded check-then-insert race in
+`get_or_create_customer` (two concurrent callers for the same phone
+number could crash `save_session` with an unhandled `UniqueViolation`).
+Both reproduced live with real threads/connections before being fixed.
+Tenant isolation suite now runs against both backends (13 tests); two
+new concurrency tests prove F6 idempotency under a genuine race, not
+just sequential order. New CI job `postgres-contract` (real Postgres
+service container, separate from the offline gate).
+
 ## T-059 · Store hours (and ticket timestamps) were timezone-naive — **DONE, 2026-09-23**
 
 **Priority:** 0 · **Status:** Done. Full diagnosis in `docs/STATUS.md`'s
