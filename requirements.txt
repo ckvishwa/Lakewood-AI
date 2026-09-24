@@ -3,6 +3,20 @@
 pyyaml>=6.0        # eval case loading
 pytest>=8.0        # tests
 
+# T-059: store_status() (lakewood/orders.py — core domain, unconditionally
+# imported) uses stdlib zoneinfo to evaluate HOURS in the store's OWN
+# timezone rather than the server process's — the fix for a real bug
+# (ADR-019 puts the server on a UTC cloud host; a raw server-local clock
+# read Eastern dinner-rush hours as "closed"). zoneinfo itself is stdlib,
+# but it needs a real IANA tz database backing it: Linux/Mac cloud hosts
+# normally have one (/usr/share/zoneinfo) and this package becomes a
+# harmless no-op there; Windows does not ship one at all, so this is not
+# optional the way faster-whisper/psycopg2/sounddevice below are — every
+# environment (dev, CI, prod) needs it declared, not left to whatever the
+# OS happens to provide. Standard, Python-documented pattern, not a
+# workaround.
+tzdata>=2024.1
+
 # Optional — needed for LAKEWOOD_STT_PROVIDER=faster_whisper (ADR-008), AND
 # for real VAD-based capture (T-050/ADR-018): faster-whisper bundles a
 # Silero VAD ONNX model + onnxruntime it already uses for its own

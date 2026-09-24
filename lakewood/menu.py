@@ -17,6 +17,14 @@ _DATA_PATH = Path(__file__).resolve().parent.parent / "data" / "menu.json"
 with open(_DATA_PATH, "r", encoding="utf-8") as _f:
     _RAW = json.load(_f)
 
+# T-059: HOURS below is meaningless without knowing which timezone it's
+# in — a per-store fact, same kind as the store's own address, never a
+# global constant and never inferred from wherever the server process
+# happens to run. Lives in data/menu.json next to `store.address` for the
+# same reason HOURS does: one source of truth, multi-tenant-ready (a
+# second store's own menu.json carries its own timezone).
+STORE_TIMEZONE = _RAW["store"]["timezone"]
+
 TAX_RATE_NUMERATOR = _RAW["currency"]["tax_rate_numerator"]
 TAX_RATE_DENOMINATOR = _RAW["currency"]["tax_rate_denominator"]
 DELIVERY_SERVICE_CHARGE = _RAW["currency"]["delivery_service_charge_cents"]

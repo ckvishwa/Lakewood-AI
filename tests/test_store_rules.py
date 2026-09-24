@@ -3,7 +3,8 @@ Owner-confirmed store rules. These are policy, not reverse engineering — if on
 of these changes, the owner told us, and this file is where it gets recorded.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -68,6 +69,68 @@ def test_hours(when, is_open):
 def test_monday_rolls_to_tuesday():
     st = store_status(datetime.fromisoformat("2026-09-07 19:00"))
     assert st["next_open"] == "Tuesday at 11 AM"
+
+
+# ---------------------------------------------------------------------------
+# T-059 (docs/STATUS.md's own entry has the full diagnosis): store_status()
+# used to compare raw server-local wall-clock time against HOURS with no
+# timezone at all. ADR-019 puts the orchestrator on a UTC cloud server, so
+# in production this would have held every real Eastern dinner-rush order
+# as "closed" — proven concretely by T-058's CI run landing on Wednesday
+# 22:00 UTC (= 6:08 PM Eastern, well within hours) and reading it closed.
+# ---------------------------------------------------------------------------
+
+def test_dinner_rush_on_a_utc_server_clock_is_open():
+    """The exact bug, reproduced directly: a UTC-clock server evaluating
+    Wednesday 22:00 UTC (6:08 PM Eastern, mid dinner rush) must read the
+    store as OPEN, not closed."""
+    utc_instant = datetime(2026, 9, 23, 22, 0, tzinfo=timezone.utc)
+    st = store_status(utc_instant)
+    assert st["open"] is True
+
+
+@pytest.mark.parametrize("server_tz", [
+    "UTC", "America/Los_Angeles", "Europe/London", "Asia/Tokyo", "Pacific/Auckland",
+])
+def test_same_real_instant_same_answer_regardless_of_server_timezone(server_tz):
+    """The open/closed answer must depend ONLY on the store's own local
+    time, never on what timezone the calling server/process happens to be
+    in. One real instant (Wednesday 6 PM Eastern, mid dinner rush),
+    represented as datetimes carrying every one of these server
+    timezones' own tzinfo — all must convert to the identical store-local
+    moment and agree."""
+    # 2026-09-23 18:00 America/New_York, expressed once, then re-expressed
+    # in each server timezone's own local clock for the SAME real instant.
+    anchor = datetime(2026, 9, 23, 18, 0, tzinfo=ZoneInfo("America/New_York"))
+    as_server_tz = anchor.astimezone(ZoneInfo(server_tz))
+    assert store_status(as_server_tz)["open"] is True
+
+
+def test_naive_now_is_still_treated_as_store_local_time():
+    """Backward-compat: every existing caller/test passes a NAIVE datetime
+    meaning 'store-local wall time' — that contract must not silently
+    change just because aware-datetime support was added."""
+    naive_in_hours = datetime(2026, 9, 23, 18, 0)  # no tzinfo at all
+    assert store_status(naive_in_hours)["open"] is True
+
+
+def test_dst_transition_is_handled_by_a_real_tz_database_not_a_fixed_offset():
+    """The clearest possible proof this uses real DST rules, not a fixed
+    UTC offset: the SAME UTC clock hour (02:00), on the SAME day of week
+    (Tuesday), on either side of the 2026-11-01 US fall-back transition,
+    must produce DIFFERENT open/closed answers — because the store's own
+    local hour shifts by exactly one (EDT UTC-4 -> EST UTC-5). A fixed-
+    offset implementation would give the same wrong answer both times."""
+    before_fallback = datetime(2026, 9, 30, 2, 0, tzinfo=timezone.utc)   # EDT era
+    after_fallback = datetime(2026, 11, 4, 2, 0, tzinfo=timezone.utc)    # EST era
+
+    before = store_status(before_fallback)
+    after = store_status(after_fallback)
+
+    # 02:00 UTC = 22:00 EDT (Tue, at the exact close boundary) -> closed
+    assert before["open"] is False
+    # 02:00 UTC = 21:00 EST (Tue, one hour before close) -> open
+    assert after["open"] is True
 
 
 def test_after_hours_order_is_disclosed_in_readback(sess, monkeypatch):

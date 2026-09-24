@@ -2,6 +2,32 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-059 · Store hours (and ticket timestamps) were timezone-naive — **DONE, 2026-09-23**
+
+**Priority:** 0 · **Status:** Done. Full diagnosis in `docs/STATUS.md`'s
+own T-059 entry.
+
+The real bug T-058 was covering for: `store_status()` compared server
+wall-clock hour against `HOURS` with no timezone — fine on a dev machine
+whose local zone happens to roughly match the store's, silently wrong on
+ADR-019's UTC cloud server. Fixed with `data/menu.json`'s new
+`store.timezone`, `menu.STORE_TIMEZONE`, `orders.store_now()`
+(`zoneinfo`, real DST-aware tz database, `tzdata` added to
+`requirements.txt` for Windows), and `store_status()` now converts any
+aware input / defaults via `store_now()` — naive input keeps meaning
+store-local, unchanged contract. Two more real sites of the same bug
+found and fixed: `printer.py::build`'s printed ticket date line and
+`printer.py::dispatch_confirmed_order`'s printed ticket body both used
+to timestamp with the server's own clock (`timefmt.format_12h()`'s bare
+default / raw `time.strftime`) — worse than `store_status()`, since
+these were wrong on every ticket, not just near an hour boundary. Every
+other real-time call site in the codebase grepped and reported: all
+remaining ones do epoch-duration subtraction only (timezone-independent
+by construction), confirmed by reading each one. 8 new regression tests,
+including a same-instant-different-server-timezones proof and a real
+DST-boundary case. Full suite 717 passed/2 skipped/2 xfailed, `validate`
+91/91, ratchet 59/91, parity 50/50.
+
 ## Standing rule (added by T-058, 2026-09-23)
 
 **Any test exercising code with a real-time/environment dependency

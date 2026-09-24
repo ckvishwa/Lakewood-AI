@@ -24,6 +24,67 @@ execution.
 
 ## Current phase
 
+**T-059 done, 2026-09-23 (P0): store hours were timezone-naive — the
+real bug behind T-058's CI failure, not just a test-determinism gap.**
+
+T-058 fixed the SYMPTOM (tests not pinning `store_status()`). This task
+fixes the actual production bug it was covering for:
+`orders.store_status()` compared the process's raw wall-clock hour
+against `HOURS` with no timezone at all. ADR-019 puts the orchestrator
+on a UTC cloud server — in production this would hold every real Eastern
+dinner-rush order as "closed" until the next morning, not just fail a
+CI run at a specific unlucky hour.
+
+**Fix:** `data/menu.json`'s `store` block gets a real `timezone` field
+(`"America/New_York"` — Waterbury, CT), exposed as `menu.STORE_TIMEZONE`.
+New `orders.store_now()` returns the current instant localized to the
+store's own timezone via stdlib `zoneinfo` (real IANA tz database, DST-
+aware — never a fixed UTC offset). `store_status(now=...)`: naive input
+still means store-local (unchanged contract, every existing test/caller
+keeps working); timezone-aware input is converted to store-local first;
+the default (`now=None`) uses `store_now()`, never the server's own
+clock. `requirements.txt` gains `tzdata` (Windows ships no IANA
+database at all; Linux/Mac cloud hosts normally do, so this is a no-op
+there, but core domain logic must not depend on incidental OS state).
+
+**Same bug found and fixed at two more sites, both real, both customer/
+kitchen-facing (worse than `store_status()` — wrong on EVERY ticket,
+always, not just near an hour boundary):** `lakewood/timefmt.py::
+format_12h()`'s bare-call default read `time.localtime()` (server clock).
+Its own default stays server-local/generic on purpose — the fix is at
+the three real call sites, all changed to pass `store_now().timetuple()`
+explicitly: `orders.py::confirm_order`'s embedded/persisted ticket text,
+and `printer.py::build`'s printed date line + `printer.py::
+dispatch_confirmed_order`'s printed ticket body (the latter also fixed a
+second bug in the same line: the date was built with raw
+`time.strftime('%m/%d')`, same server-clock dependency).
+
+**Every other `datetime.now()`/`time.time()` site grepped and reported,
+not just the two fixed:** all remaining sites (`orders.py`'s call-timer/
+disclosure/quote-TTL timestamps, `memory_repository.py`'s `_updated_at`,
+`recovery.py`'s resume-window check, `retention.py`'s two sweep
+functions, `service.py`'s `confirmed_at`/`dispatched_at`,
+`evals/runner.py`'s trace filename) store or compare raw Unix epoch
+floats via **subtraction only** (a duration, never an hour-of-day/day-
+of-week lookup) — epoch time is timezone-independent by construction, so
+none of these carry the bug. Confirmed by reading each one, not assumed
+safe by pattern-matching.
+
+**Tests:** `tests/test_store_rules.py` gains 8 new cases — the exact
+CI-failure instant reproduced directly (Wed 22:00 UTC = 6:08 PM Eastern
+→ open), the same real instant expressed in 5 different server
+timezones proven to agree, explicit naive-input backward-compat, and a
+DST-boundary case (same UTC clock hour, same weekday, opposite sides of
+the 2026-11-01 US fall-back transition, proven to give DIFFERENT
+answers — the only way to prove real tz-database DST handling rather
+than a disguised fixed offset). Verified live under a simulated UTC
+server process (`TZ=UTC`), not just via injected arguments: `time.
+localtime()` read hour 22 while `store_now()` correctly read 6:39 PM
+Eastern.
+
+Full suite 717 passed/2 skipped/2 xfailed, `validate` 91/91, ratchet
+59/91, parity 50/50 — zero regressions.
+
 **T-058 done, 2026-09-23 (P0): fixed `main` — CI permissions +
 dispatch-status "state collision" (misdiagnosed in the brief; actually a
 single real-time dependency bug).**

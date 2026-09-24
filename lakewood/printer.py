@@ -268,7 +268,13 @@ class TicketPrinter:
         b += [b"** AI PHONE ORDER **\n", b"=" * WIDTH + b"\n"]
 
         b += [ALIGN_L]
-        head = [f"Ord# {order_id}", f"{format_12h()}  {time.strftime('%m/%d')}"]
+        # T-059: store-local date/time on the physical ticket, never the
+        # server's own clock — a cloud server (ADR-019) would otherwise
+        # print the wrong date/time on every single ticket, not just near
+        # a boundary. See lakewood.orders.store_now()'s docstring.
+        from .orders import store_now
+        ticket_now = store_now()
+        head = [f"Ord# {order_id}", f"{format_12h(ticket_now.timetuple())}  {ticket_now.strftime('%m/%d')}"]
         b += [f"{head[0]:<22}{head[1]:>20}\n".encode()]
         if name or phone:
             b += [f"{name or 'Phone order':<22}{phone:>20}\n".encode()]
@@ -345,7 +351,7 @@ def dispatch_confirmed_order(sess, printer: TicketPrinter):
     # After-hours orders are held, not printed. A ticket landing on a dark
     # kitchen's printer at 11pm is a ticket nobody sees. The scheduler prints
     # the queue at opening.
-    from .orders import store_status
+    from .orders import store_now, store_status
     st = store_status()
     if not st["open"]:
         sess.to("HELD_FOR_OPEN")
@@ -355,7 +361,8 @@ def dispatch_confirmed_order(sess, printer: TicketPrinter):
                 "message": f"Held until {st.get('next_open')}."}
 
     q = sess.order.quote()
-    body = render_ticket(sess.order, sess.order_id, format_12h())
+    # T-059: store-local time on the printed ticket — see store_now().
+    body = render_ticket(sess.order, sess.order_id, format_12h(store_now().timetuple()))
     payload = printer.build(
         body,
         order_type="delivery" if sess.order.order_type == "DELIVERY" else "carry-out",
