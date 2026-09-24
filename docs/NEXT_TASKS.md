@@ -2,6 +2,53 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 2 Part 1 · Security scaffolding — **DONE, 2026-09-24**
+
+**Priority:** 0 · **Status:** Done. `lakewood/telephony/` (new):
+`webhook_auth.py` (Twilio's own `RequestValidator`, lazy-imported —
+missing/forged/tampered/wrong-URL/wrong-account signatures all rejected),
+`stream_token.py` (self-built HMAC-SHA256 signed/short-lived/single-use
+token for the media WebSocket URL — neither Twilio nor Telnyx signs that
+connection itself, confirmed in ADR-021), `rate_limit.py` (fixed-window,
+per-key), `call_start.py` (idempotent call start, two layers: an
+in-process TTL guard plus the already-existing `sessions` table's
+`ON CONFLICT (store_id, call_id) DO UPDATE` upsert — proven together by a
+test that replays a call-start webhook and checks exactly one row and one
+cart line results). 33 new tests, all four required proofs covered
+(unsigned webhook rejected, forged WS token refused, replayed call-start
+produces one session — plus a fourth this task added, tampered-params-
+under-a-real-signature rejected). `requirements.txt` gains `twilio`
+(optional, lazy-imported, same pattern as psycopg2-binary/piper-tts).
+
+**Real incidental finding, reported not silently fixed (CLAUDE.md: report
+at full severity even when out of scope):** `resume_or_create` has no way
+to distinguish "this CallSid was retried" from "this phone number is
+calling back after a drop" — both look identical to it (a non-terminal
+session within the 30-minute resume window for that phone). In normal
+operation `CallStartGuard`'s TTL should always catch a same-CallSid retry
+first and never let it reach `resume_or_create` at all; this only
+surfaces if the in-process guard's memory is lost (a process restart
+mid-call) — at which point treating it as a resume OFFER rather than a
+silent continuation is arguably correct anyway (ADR-014's own "offer,
+never silently continue" posture), just worth knowing the two concerns
+share one mechanism with no seam between them. Not fixed here — no
+concrete failure case yet, Part 2/3's real webhook handler is what will
+prove whether this ever actually matters in practice.
+
+Gates: `pytest` exit 0, zero failure markers (this environment's pytest
+does not print its own trailing summary line under this session's
+console/redirection — a pre-existing quirk, not new; verified by dot-count
+and exit code instead, same as this environment's other recent runs have
+occasionally noted). `validate` 91/91 unchanged. `score --adapter
+rule_based` 59/91 unchanged. `pricing_parity` 50/50 unchanged. `bandit -r
+lakewood scripts -ll` (excluding the local, gitignored `lakewood/env/`
+venv CI never sees): 0 issues. No prompt/tool-schema/provider surface
+touched — no live LLM gate required. **RECOMMENDED NEXT: T-053 Phase 2
+Part 2/3** (the real webhook + WS handler that wires these four modules
+together and calls into `PersistentChat`/`run_turn_traced` — still fully
+offline-testable against a fake provider; a real Twilio account is only
+needed starting at Part 5's real-call testing).
+
 ## T-053 Phase 2 Part 0 · Telephony provider ADR — **DONE, 2026-09-24**
 
 **Priority:** 1 · **Status:** Done. Full evidence:

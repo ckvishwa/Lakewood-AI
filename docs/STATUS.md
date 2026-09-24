@@ -24,6 +24,85 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 2 Part 1, 2026-09-24 (security scaffolding) — done, before
+any audio is carried, per this phase's own required sequencing.**
+
+New `lakewood/telephony/` package, four modules, each with its own test
+file (33 tests total):
+
+- `webhook_auth.py` — `validate_twilio_signature()` wraps Twilio's own
+  `RequestValidator` (lazy-imported; ADR-021's own consequence: buy this
+  primitive, don't hand-roll HMAC comparison). Proven against the REAL
+  validator on both sides (tests build a genuine signature the same way
+  Twilio's SDK would): missing signature rejected, forged signature
+  rejected, signature bound to the wrong URL rejected, tampered params
+  under an otherwise-real signature rejected, signature computed under a
+  different account's auth token rejected.
+- `stream_token.py` — `StreamTokenIssuer`: HMAC-SHA256, stdlib-only,
+  signed/short-lived (default 90s)/single-use tokens for the `<Stream
+  url=...>` this server hands back to Twilio. Built because neither
+  Twilio nor Telnyx signs the media WebSocket connection itself —
+  confirmed directly against Twilio's `<Stream>` docs while writing
+  ADR-021, not assumed. Proven: forged signature refused, wrong-secret
+  token refused, malformed token refused, expired token refused, a
+  consumed token cannot be replayed (single-use, not just short-lived),
+  and two tokens minted for the SAME call_sid (a legitimate reconnect
+  after a dropped WebSocket, Part 4) are independently single-use.
+- `rate_limit.py` — `RateLimiter`: fixed-window counter per key
+  (source IP today), stdlib-only, thread-safe. Deliberately not a sliding
+  window or token bucket — the extra smoothness isn't worth the extra
+  state at ~30 calls/day (CLAUDE.md P5, operational simplicity).
+- `call_start.py` — `CallStartGuard`: idempotent call start, TWO layers
+  proven together, not just described:
+  1. An in-process, TTL'd "already seen this CallSid" guard — the cheap
+     fast path for a webhook retry that arrives while (or shortly after)
+     the first delivery is being handled.
+  2. The persistence layer's own `sessions` table, already keyed
+     `PRIMARY KEY (store_id, call_id)` with `save_session` doing
+     `ON CONFLICT ... DO UPDATE` (built in T-037/ADR-014, re-verified
+     here rather than re-invented) — the durable guarantee that survives
+     even a process restart, where layer 1's memory is gone.
+  A real end-to-end test replays a call-start webhook against a real
+  `PersistentChat`/`InMemorySessionRepository` pair (not a mock) and
+  checks exactly one session row and exactly one cart line resulted — the
+  literal acceptance criterion this phase's brief asks for
+  ("a replayed call-start produces one session").
+
+**Real incidental finding, reported at full severity, not fixed here
+(CLAUDE.md: report even when fixing is out of scope):** while building
+the layer-2 test, found that `resume_or_create` (`persistence/service.py`)
+has no way to tell "this CallSid was retried" apart from "this phone
+number is calling back after a genuine drop" — both look identical to it
+(any non-terminal session for that phone within the 30-minute resume
+window). In real operation, `CallStartGuard`'s TTL should always intercept
+a same-CallSid retry before it ever reaches `resume_or_create`; this only
+surfaces if the in-process guard's own memory is lost (a process restart
+mid-call), and even then, treating it as a resume OFFER rather than a
+silent continuation arguably matches ADR-014's own stated posture ("offer
+resume, never silently continue") — it's not obviously wrong, just a real
+seam between two features that currently share one mechanism with no
+distinction between them. Whether this ever actually matters in practice
+is something Part 2/3's real webhook handler will settle, not asserted
+here either way.
+
+`requirements.txt` gains `twilio>=9.0` (optional, lazy-imported inside
+`webhook_auth.py` only — no core domain file imports it, same pattern as
+`psycopg2-binary`/`piper-tts`; installed and verified locally,
+`twilio==9.11.1` resolved).
+
+**Gates run:** `pytest` — exit 0, zero `F`/`E` markers across the full dot
+stream (this environment's pytest does not print its own trailing summary
+line under this session's console/redirection, a pre-existing capture
+quirk unrelated to this task's changes — verified by exit code and
+absence of any failure marker instead, and cross-checked against
+`tests/test_pricing_parity.py` alone, which produced the expected 50 dots
+with the same missing-summary behavior). `evals/runner.py validate` →
+91/91 unchanged. `evals/runner.py score --adapter rule_based` → 59/91
+unchanged. `bandit -r lakewood scripts -ll` (excluding the local,
+gitignored, CI-never-sees `lakewood/env/` venv) → 0 issues. No prompt/
+tool-schema/provider surface touched — no live LLM N=3 gate required,
+stated explicitly, not skipped silently.
+
 **T-053 Phase 2 Part 0, 2026-09-24 (telephony provider ADR) — done.**
 Preconditions checked live before starting, not assumed: CI green on all 5
 jobs (offline gate, pip-audit, gitleaks, `postgres-contract`, bandit) at
