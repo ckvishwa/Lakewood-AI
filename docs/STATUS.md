@@ -24,6 +24,93 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 2 Part 2, 2026-09-24 (audio path and concurrency) — done,
+offline against fake providers throughout — no Twilio account needed
+yet.**
+
+```
+provider WS (8kHz mu-law) -> decode, resample 16kHz -> VAD -> STT
+                                                                |
+                              [PersistentChat.run_turn — unchanged path]
+                                                                |
+provider WS (8kHz mu-law) <- encode, resample <- TTS  <--------
+```
+
+Four new `lakewood/telephony/` modules:
+
+- `audio_codec.py` — mu-law <-> PCM16 + rate conversion, wrapping stdlib
+  `audioop` (`ulaw2lin`/`lin2ulaw`/`ratecv`) rather than hand-rolling
+  either. **Real decision, not a default:** a subtly-wrong hand-rolled
+  resampler or mu-law table would degrade real caller audio in a way no
+  offline test here could catch (this system's own moat is accuracy on
+  real speech) — "buy, don't build" applied to a DSP primitive.
+  **Disclosed risk:** `audioop` is deprecated, slated for removal in
+  Python 3.13; this project currently pins/runs 3.12 (confirmed).
+  Replacing it now would be speculative work (CLAUDE.md); revisit this
+  module specifically before any 3.13+ upgrade.
+- `twilio_protocol.py` — pure parsing/building for Twilio Media Streams'
+  WS JSON messages (`connected`/`start`/`media`/`stop`/`mark` in,
+  `media`/`mark` out). The one place Twilio's own shapes are allowed to
+  appear — `call_session.py` never imports it, so a second vendor only
+  needs a new module like this one. Every malformed/unknown event is
+  rejected, never guessed (an internet-facing socket).
+- `concurrency.py` — the actual concurrency model, decided with evidence:
+  - **STT capped at 1 concurrent request (`STT_GATE`).** Read
+    `scripts/parakeet_server.py` directly for this task: it uses stdlib
+    `http.server.HTTPServer`, NOT `ThreadingHTTPServer` — a REAL,
+    already-existing constraint, not a hypothetical caution. Two
+    concurrent calls' STT requests genuinely serialize; this makes that
+    fact explicit and safe (queued latency, never corrupted audio) rather
+    than an unguarded race against infrastructure that can't actually
+    handle it.
+  - **TTS capped at 8 (`TTS_GATE`), but as a resource cap only.** Each
+    call constructs its OWN `PiperTTSProvider` (own ONNX session) — no
+    shared session, so no concurrent-Run() thread-safety question even
+    applies. The gate just bounds CPU-bound synthesis threads under a
+    burst.
+  - **`PersistentChat.run_turn`/domain: NO gate, deliberately.** Already
+    proven safe under real concurrent Postgres access (Part B's two
+    concurrency-bug fixes, `postgres-contract` CI). This is the literal
+    mechanism behind "one call's LLM latency never blocks another's
+    audio" — by never gating that path at all, not a scheduler trick.
+  Proven with real threads (not mocks): a gate of N never lets N+1 wrapped
+  calls run at the same wall-clock instant; an exception still releases
+  the slot (no deadlock on a second caller).
+- `call_session.py` — `PhoneCallSession`, the per-call engine. Disclosure
+  plays via `on_call_started()` BEFORE `on_inbound_frame` will accept any
+  audio (raises `RuntimeError` otherwise — T-057, unchanged mechanism,
+  reused via `PersistentChat.disclosure_played_at`/`mark_disclosure_played()`,
+  whose own docstring already named this exact call site: "LocalVoiceLoop
+  today; T-053's phone loop tomorrow"). Inbound audio accumulates per-call
+  (own buffer, own `Endpointer`), polled every `poll_seconds` (default
+  0.15s, matching `SoundDeviceMicrophone`'s own cadence) — recomputes VAD
+  probability over the growing buffer each poll rather than threading
+  incremental resample state, the SAME pattern `lakewood.voice` already
+  uses, not a new one. On endpoint: STT (through `STT_GATE`) ->
+  `PersistentChat.run_turn` (same path text/local-voice use, never
+  `orders.py` directly) -> TTS (through `TTS_GATE`) -> resample -> mu-law.
+  STT failure and total silence both degrade to the same spoken apology
+  as `LocalVoiceLoop.turn()` already uses — one apology vocabulary across
+  every call surface — never a crash, never an unhandled exception
+  reaching the transport layer.
+
+**Real isolation proven, not just asserted:** a test runs two
+`PhoneCallSession`s concurrently (interleaved `on_inbound_frame` calls,
+same wall-clock loop) against two separate `PersistentChat`/cart pairs —
+one orders pepperoni, the other cheese, and the pepperoni topping is
+checked absent from the second cart's line items. 39 new tests total
+across the four modules (audio codec round-trip/lossy-bounded/resample
+ratios, protocol parse/reject, concurrency-gate real-thread proofs,
+call-session disclosure/full-turn/isolation/no-speech/STT-failure/
+stereo-TTS-rejected).
+
+**Gates run:** full suite exit 0, zero failure markers, same skip/xfail
+pattern as baseline. `evals/runner.py validate` → 91/91 unchanged.
+`score --adapter rule_based` → 59/91 unchanged. `bandit -r lakewood
+scripts -ll` (excluding `lakewood/env/`) → same 8 pre-existing low-
+severity/low-confidence items as every prior clean run, zero new. No
+prompt/tool-schema/provider surface touched — no live LLM gate required.
+
 **T-053 Phase 2 Part 1, 2026-09-24 (security scaffolding) — done, before
 any audio is carried, per this phase's own required sequencing.**
 
