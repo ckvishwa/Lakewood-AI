@@ -2,6 +2,25 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 2 Part 0 · Telephony provider ADR — **DONE, 2026-09-24**
+
+**Priority:** 1 · **Status:** Done. Full evidence:
+`docs/decisions/ADR-021-twilio-telephony-provider.md`, closes ADR-004.
+
+Twilio picked over Telnyx on reliability/integration-risk grounds (CLAUDE.md
+P2, above cost at P7), with every figure sourced: 8kHz μ-law audio,
+documented inbound/outbound `track` separation on the bidirectional stream
+(Telnyx's public docs left this unconfirmed), zero-app-server-dependency
+TwiML Bin fallback (`<Dial>` to the restaurant's real line even if this
+system's whole server is down — parity with Telnyx's TeXML Bin), $0.0125/min
+combined vs. Telnyx's cheaper $0.0087/min (noted, not decisive at this
+volume/priority). Neither vendor signs the media WebSocket itself — Part 1
+still needs a self-built signed/short-lived/single-use stream-URL token
+regardless of vendor. **RECOMMENDED NEXT: T-053 Phase 2 Part 1** (security
+scaffolding — webhook signature validation, WS token auth, replay
+protection, rate limiting, idempotent call start — fully offline-testable
+against a fake provider, no live Twilio account needed yet).
+
 ## T-053 Phase 1 Part D · One host — **DONE, 2026-09-24**
 
 **Priority:** 1 · **Status:** Done. Full transcript and numbers:

@@ -24,6 +24,39 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 2 Part 0, 2026-09-24 (telephony provider ADR) — done.**
+Preconditions checked live before starting, not assumed: CI green on all 5
+jobs (offline gate, pip-audit, gitleaks, `postgres-contract`, bandit) at
+HEAD `22fd553`, tree clean, HEAD matches origin; `SECURITY_AUDIT_T054.md`'s
+3 code-fixable Criticals closed (2 remaining are owner/legal-only, don't
+block engineering start per that report's own verdict); Codex trust on
+this repo confirmed removed (`~/.codex/config.toml` no longer lists
+`d:\projects\ai` or its nested `evals` entry — resolved since T-054/T-058's
+last check). One thing changed since the last snapshot: the repo flipped
+back to **public** (`isPrivate: false`), but branch protection is still
+off (404, unprotected) — proceeding on the manual `gh pr checks`-before-
+merge gate this phase's brief requires regardless, no exception taken.
+
+Picked Twilio over Telnyx for the telephony provider — full sourced
+comparison in `docs/decisions/ADR-021-twilio-telephony-provider.md`, which
+closes ADR-004 (that ADR's original STT/TTS cost table was already
+superseded by ADR-016/ADR-020 going self-hosted; telephony transport was
+the one leg still unbought). Decisive factors: Twilio Media Streams'
+documented inbound/outbound `track` separation on the bidirectional
+WebSocket (Telnyx's public docs didn't confirm this for its bidirectional
+mode — had to be left unverified rather than assumed), and Twilio's
+deeper, more battle-tested reference set for this exact integration shape
+— weighted above Telnyx's real ~30% lower cost (P7, below reliability at
+P2) and its genuinely stronger Ed25519 webhook-signing primitive (noted,
+not decisive). Both vendors support a zero-app-server-dependency fallback
+(TwiML Bin / TeXML Bin, `<Dial>` to the restaurant's real line) — the
+mechanism Part 4's "server down" safety net needs either way. Neither
+vendor signs the media WebSocket itself; Part 1 still builds its own
+signed/short-lived/single-use stream-URL token regardless of vendor.
+
+No code changed this part (pure vendor research + ADR). Full suite
+re-confirmed unaffected: exit 0, zero failures — doc-only change.
+
 **T-053 Phase 1 Part D, 2026-09-24 (one host) — done, real end-to-end
 session, real numbers.**
 
