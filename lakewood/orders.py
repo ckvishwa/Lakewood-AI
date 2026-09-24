@@ -55,10 +55,11 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from . import coupons as cp
 from . import speech
-from .menu import HOURS, DELIVERY_MINIMUM, DELIVERY_RADIUS_MILES
+from .menu import HOURS, STORE_TIMEZONE, DELIVERY_MINIMUM, DELIVERY_RADIUS_MILES
 from .timefmt import format_12h
 from .pricing import (
     SIZES, GOURMET_ROUND, GOURMET_SICILIAN_OVERRIDES, NON_PIZZA,
@@ -340,6 +341,17 @@ DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
         "Saturday", "Sunday"]
 
 
+def store_now() -> datetime:
+    """T-059: the current real instant, localized to the store's own
+    timezone (`STORE_TIMEZONE`) — never the server process's own clock.
+    The one place any caller needing "right now, in store-local time"
+    should get it from; `store_status()` below and every ticket
+    timestamp (`printer.py`, via `timefmt.format_12h`) use this, not a
+    bare `datetime.now()`/`time.localtime()` of their own. See this
+    module's `store_status` docstring for the full ADR-019 context."""
+    return datetime.now(ZoneInfo(STORE_TIMEZONE))
+
+
 def store_status(now: datetime | None = None) -> dict:
     """
     Owner-confirmed hours. Closed Mondays.
@@ -347,8 +359,29 @@ def store_status(now: datetime | None = None) -> dict:
     After-hours calls currently just go unanswered, which is pure lost revenue.
     The agent takes the order anyway and holds it — but it MUST say when the
     food will be ready. Never let a 10:30pm caller believe it's coming tonight.
+
+    T-059: `HOURS` is in the STORE'S OWN local time (`STORE_TIMEZONE`,
+    `data/menu.json`'s `store.timezone`) — never the server process's own
+    clock. ADR-019 puts the orchestrator on a cloud server, which runs
+    UTC; comparing a raw server-local `datetime.now()` against `HOURS`
+    directly is exactly the bug that read Wednesday 6:08 PM Eastern
+    dinner-rush as "closed" once CI's UTC runner landed on hour 22 (see
+    `docs/STATUS.md`'s T-059 entry). `now`, if given NAIVE (no tzinfo),
+    is treated as already store-local — the same contract every existing
+    caller/test already relies on. If given timezone-AWARE, it's
+    converted to the store's own timezone first — this is what makes
+    "the same real instant, evaluated from a server running in any
+    timezone" always produce the same open/closed answer, real tz
+    database (DST-aware), never a fixed UTC offset. The default
+    (`now=None`) reads the current real instant localized to the store's
+    timezone explicitly, never the server's own.
     """
-    now = now or datetime.now()
+    if now is None:
+        now = store_now()
+    elif now.tzinfo is not None:
+        now = now.astimezone(ZoneInfo(STORE_TIMEZONE))
+    # else: a naive `now` is already store-local time — unchanged contract.
+
     today = HOURS.get(now.weekday())
     if today and today[0] <= now.hour < today[1]:
         return {"open": True, "closes_at": f"{today[1] % 12 or 12} PM"}
@@ -361,8 +394,12 @@ def store_status(now: datetime | None = None) -> dict:
             hh = win[0]
             label = f"{DAYS[probe.weekday()]} at {hh % 12 or 12} " \
                     f"{'AM' if hh < 12 else 'PM'}"
+            # next_open_iso reports store-local wall time, no UTC offset
+            # suffix — same shape this field has always had, regardless
+            # of whether `now` arrived naive, aware, or defaulted.
+            next_open = probe.replace(hour=hh, tzinfo=None)
             return {"open": False, "next_open": label,
-                    "next_open_iso": probe.replace(hour=hh).isoformat()}
+                    "next_open_iso": next_open.isoformat()}
     return {"open": False, "next_open": None}
 
 
@@ -1177,8 +1214,11 @@ def confirm_order(sess: Session, quote_id: str, idempotency_key: str | None = No
 
     q = sess.order.quote()
     sess.to("CONFIRMED")                                          # F12
+    # T-059: store-local time, never the server's own clock — see
+    # store_now()'s docstring.
     result = ok(order_id=sess.order_id, total=q["total"],
-                ticket=render_ticket(sess.order, sess.order_id, format_12h()))
+                ticket=render_ticket(sess.order, sess.order_id,
+                                     format_12h(store_now().timetuple())))
     if idempotency_key:
         sess.idempotency[idempotency_key] = result
     sess.log("confirmed", order_id=sess.order_id, total=q["total"])

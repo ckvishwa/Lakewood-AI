@@ -3,7 +3,8 @@
   "store": {
     "name": "Lakewood Pizza",
     "address": "562 Lakewood Rd, Waterbury, CT 06704",
-    "pos": "MicroWorks PrISM 8.1.153"
+    "pos": "MicroWorks PrISM 8.1.153",
+    "timezone": "America/New_York"
   },
   "currency": {
     "unit": "cents",
