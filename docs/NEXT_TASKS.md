@@ -2,6 +2,21 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 1 Part C · Linux TTS — **DONE, 2026-09-24**
+
+**Priority:** 1 · **Status:** Done. Full evidence:
+`docs/decisions/ADR-020-linux-tts-piper.md`.
+
+Piper chosen over Kokoro on measured evidence: ~8x faster synthesis,
+real streaming, 25/25 vs 23/25 item-word accuracy on a real 8kHz μ-law
+round trip through the real Parakeet service. Hosted TTS left honestly
+unmeasured (no credentials in this environment) rather than fabricated.
+`lakewood/tts/piper_provider.py` implemented and wired into
+`make_tts_provider()`; T-051's readback invariants re-confirmed
+unaffected by provider choice (they're domain-text-level, not audio-
+level). Open items, not silently closed: a human listening pass, any
+hosted-TTS comparison.
+
 ## T-053 Phase 1 Part A · Server Direct Print — **BLOCKED, 2026-09-24**
 
 **Priority:** 2 · **Status:** Blocked on physical LAN access. Dev machine

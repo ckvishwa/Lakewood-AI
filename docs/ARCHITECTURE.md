@@ -120,7 +120,8 @@ no tool takes a price; no tool takes `store_id`.
 
 ## Storage
 
-**CURRENT (T-037): Postgres, single instance, multi-tenant schema.**
+**CURRENT (T-037, verified against a real server T-053 Phase 1): Postgres,
+single instance, multi-tenant schema.**
 `lakewood/persistence/` — a repository interface (`SessionRepository`) with
 two implementations: `InMemorySessionRepository` (zero dependencies; what the
 full test suite and the T-016 offline gate actually run against) and
@@ -129,7 +130,15 @@ pattern as the STT provider below). Full reasoning, including why Postgres
 was chosen over the SQLite this row used to say, and why in-memory-not-
 containerized is the offline gate's verification path:
 `docs/decisions/ADR-014-persistence-postgres-multitenant.md` (supersedes
-ADR-005).
+ADR-005). **`PostgresSessionRepository` is no longer merely
+disclosed-as-unverified** — T-053 Phase 1 ran it for real (Docker Postgres
+16: migrations up/down proven reversible, every timestamp column confirmed
+`timestamptz`, the tenant-isolation suite, and two real concurrency tests)
+and found/fixed two production bugs the in-memory repository could not have
+shown (an idle-in-transaction deadlock; an unguarded check-then-insert race
+in `get_or_create_customer`) — see `docs/STATUS.md`'s T-053 Phase 1 entry.
+CI now runs this suite against a real Postgres service container
+(`postgres-contract` job), separate from the offline gate.
 
 `orders.py`/`pricing.py`/`menu.py`/`coupons.py` are unchanged by this —
 persistence is a side-car that saves/loads a `Session` via
@@ -163,10 +172,14 @@ text path, with one executor shared by rule-based and staged LLM tools;
 confirmation uses durable persistence. **CURRENT (T-038 Phase 2 + T-050),
 local dev loop only:** `lakewood/voice.py::LocalVoiceLoop` drives the same
 `PersistentChat.run_turn` over local STT (faster-whisper/Parakeet) and TTS
-(Windows SAPI), with Silero-VAD endpointing (ADR-018) replacing a fixed
-capture window and sentence-pipelined TTS playback. Real production
-telephony (a phone line reaching this loop) remains PLANNED — ADR-004 is
-still open on the vendor.
+(Windows SAPI for dev, Piper for the Linux/production target — ADR-020),
+with Silero-VAD endpointing (ADR-018) replacing a fixed capture window and
+sentence-pipelined TTS playback. **Deployment topology CURRENT (ADR-019):
+cloud** — orchestrator, Parakeet, TTS, and Postgres all run on a single
+cloud Linux host; the printer is reached via a to-be-built self-built
+polling relay, not an inbound connection into the restaurant LAN. Real
+production telephony (a phone line reaching this loop) remains PLANNED —
+ADR-004 is still open on the vendor, topology only is decided.
 
 ## State machine
 
@@ -184,9 +197,11 @@ properties:
 
 | Concern | Choice | Lock-in risk |
 |---|---|---|
-| Telephony | Twilio or Telnyx | low — DID portable |
-| Voice agent (ASR/LLM/TTS) | **decision pending — ADR-004** | medium; keep behind an interface |
-| Printer | Epson TM-m30III (M374C), ESC/POS over tcp/9100, static IP 10.1.10.197 — real hardware verified (T-049 FINAL) | none, open protocol |
+| Telephony | **decision pending — ADR-004** (candidates: Twilio, Telnyx); topology CURRENT — cloud, ADR-019 | low — DID portable |
+| STT | Parakeet (warm WSL/GPU service, ADR-016); faster-whisper CPU fallback (ADR-008) | low — behind `TextToSpeechProvider`-style interface |
+| TTS | **CURRENT (T-053 Phase 1, ADR-020): Piper** (`en_US-lessac-medium`, ONNX/CPU, zero GPU contention with Parakeet) is the Linux/production provider; Windows SAPI (ADR-015) remains the dev-only default. Real 8kHz μ-law round-trip measured via Parakeet (25/25 item-word accuracy) — see ADR-020. | low — behind `TextToSpeechProvider` |
+| LLM | Anthropic/OpenAI/Experiential, `lakewood/llm_provider.py` | low — behind one interface, no vendor type outside it |
+| Printer | Epson TM-m30III (M374C), ESC/POS over tcp/9100, static IP 10.1.10.197 — real hardware verified (T-049 FINAL). Cloud deployment reaches it via a self-built polling relay (ADR-019) — **not yet built**; Server Direct Print evaluation **BLOCKED** on physical LAN access (T-053 Phase 1 Part A) | none, open protocol |
 | POS | PrISM — **no integration**, staff re-key | none by design |
 
 Provider types must not appear in `pricing.py`, `orders.py`, or `menu.py`.

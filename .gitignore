@@ -49,6 +49,11 @@ checkpoints/
 *.pt
 *.pth
 *.onnx
+# T-053 Phase 1 Part C: downloaded Piper voice models — large binaries,
+# fetched by `python -m piper.download_voices`, never committed. *.onnx
+# above already covers the model itself; its .json config sits in the
+# same directory, so ignore the whole thing.
+piper-voices/
 
 recordings/
 benchmark_audio/

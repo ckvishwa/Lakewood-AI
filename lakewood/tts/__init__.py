@@ -7,4 +7,6 @@ def make_tts_provider():
         from .fake import FakeTTSProvider; return FakeTTSProvider()
     if name == "windows_sapi":
         from .windows_sapi import WindowsSapiTTSProvider; return WindowsSapiTTSProvider()
-    raise TTSConfigError(f"Unknown LAKEWOOD_TTS_PROVIDER={name!r}; choose 'windows_sapi' or 'fake'.")
+    if name == "piper":
+        from .piper_provider import PiperTTSProvider; return PiperTTSProvider()
+    raise TTSConfigError(f"Unknown LAKEWOOD_TTS_PROVIDER={name!r}; choose 'windows_sapi', 'piper', or 'fake'.")
