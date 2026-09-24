@@ -24,6 +24,48 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 1 Part C, 2026-09-24 (Linux TTS) — done.** Full reasoning
+and every number: `docs/decisions/ADR-020-linux-tts-piper.md`.
+
+Evaluated Piper and Kokoro (both real, both installed in an isolated
+`uv` venv inside WSL, both ONNX/CPU-only — zero GPU contention with
+Parakeet by construction, confirmed via `nvidia-smi` reading identically
+before/during synthesis) plus a hosted option **honestly left
+unmeasured** — no hosted-TTS credentials exist in this environment, and
+this project's own rule against claiming unverified behavior applies to
+this ADR's own candidates, not just application code.
+
+**Real 8kHz μ-law intelligibility round trip** (synthesize → resample to
+8kHz → μ-law encode/decode → the real, already-running Parakeet warm
+service → score on order-critical words), 4 realistic readback carts:
+Piper 25/25 item/modifier words correct, Kokoro 23/25 (one real
+degradation — "twelve piece wings" → "12 peacewings" under 8kHz μ-law,
+not a scoring artifact). Both got all 4 dollar totals numerically
+correct. Piper also ~8x faster to a finished utterance (0.188s vs.
+1.5–1.6s warm) with a genuine sub-100ms streaming first-chunk path.
+**Decision: Piper**, default settings — its own natural pace (~169 WPM,
+measured) already tested clean at 8kHz, no rate tuning needed the way
+SAPI needed (T-051/ADR-015).
+
+**Not done, disclosed as open, not silently skipped:** a human listening
+pass (this session cannot listen to audio) and any hosted-TTS comparison
+(no credentials).
+
+Implemented: `lakewood/tts/piper_provider.py` (lazy-imported, same
+optional-dependency pattern as `postgres_repository.py`), wired into
+`make_tts_provider()` as `LAKEWOOD_TTS_PROVIDER=piper`. Readback
+completeness/mutation tests (T-051) and the speakable-rendering layer
+re-confirmed unaffected by provider choice, by construction (they assert
+against the domain-produced text before any TTS call). `requirements.txt`
+gains `piper-tts` (optional); `.gitignore` gains `piper-voices/` (the
+downloaded model binary, never committed). `docs/ARCHITECTURE.md`'s
+TTS/storage/printer rows updated to reflect all of T-053 Phase 1, not
+just this part.
+
+Full offline suite: 723 passed/10 skipped/2 xfailed, `validate` 91/91,
+ratchet 59/91, parity 50/50 — zero regressions. No prompt/tool change
+this task, so no live N=3 — stated explicitly, not silently skipped.
+
 **T-053 Phase 1 Part A+B, 2026-09-24.** Part A (Server Direct Print):
 **BLOCKED** — the dev machine is currently on a different network
 (10.0.0.51) than the printer's restaurant LAN (10.1.10.x); TCP 9100/443/80

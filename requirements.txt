@@ -41,3 +41,12 @@ psycopg2-binary>=2.9   # Postgres driver for real persistence
 
 # Optional — local push-to-talk capture only; lazy-imported by lakewood.voice.
 sounddevice>=0.4       # microphone adapter; no audio hardware required by tests
+
+# Optional — LAKEWOOD_TTS_PROVIDER=piper (T-053 Phase 1 Part C): the
+# Linux-deployable production TTS provider (ADR-020). ONNX/CPU only, no
+# torch, no GPU contention with Parakeet. Windows SAPI stays the dev
+# default (ADR-015); this is what a real Linux/cloud host uses. Lazy-
+# imported inside lakewood/tts/piper_provider.py — the offline suite needs
+# nothing installed. A voice model must also be downloaded separately
+# (`python -m piper.download_voices en_US-lessac-medium`), not pip-installed.
+piper-tts>=1.8
