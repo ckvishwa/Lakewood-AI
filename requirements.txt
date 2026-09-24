@@ -49,6 +49,21 @@ sounddevice>=0.4       # microphone adapter; no audio hardware required by tests
 # same optional-dependency pattern as psycopg2-binary/piper-tts below.
 twilio>=9.0
 
+# Optional — T-053 Phase 2 Part 3: the real ASGI HTTP+WebSocket server
+# (`lakewood/telephony/app.py`) that receives Twilio's call-started
+# webhook and media stream. This system's first internet-exposed
+# endpoint (ADR-021) genuinely needs a real HTTP+WS framework — a
+# concrete need, not speculative (CLAUDE.md's "no new frameworks without
+# clear need" is a "don't build for a hypothetical" rule, not a rule
+# against ever adding one). FastAPI/Starlette's own TestClient drives
+# both routes fully offline (`tests/test_telephony_app.py`) — no real
+# network needed to test this module. `app.py` is the one module in
+# `lakewood/telephony/` that requires this; every other module in the
+# package stays framework-free.
+fastapi>=0.115
+uvicorn>=0.30
+python-multipart>=0.0.9   # Starlette's own requirement for request.form() — Twilio webhooks are form-encoded
+
 # Optional — LAKEWOOD_TTS_PROVIDER=piper (T-053 Phase 1 Part C): the
 # Linux-deployable production TTS provider (ADR-020). ONNX/CPU only, no
 # torch, no GPU contention with Parakeet. Windows SAPI stays the dev
