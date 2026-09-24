@@ -2,6 +2,34 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 2 Part 2 · Audio path and concurrency — **DONE, 2026-09-24**
+
+**Priority:** 1 · **Status:** Done, offline against fake providers (no
+Twilio account needed). New `lakewood/telephony/`: `audio_codec.py`
+(mu-law codec + rate conversion, wraps stdlib `audioop` rather than
+hand-rolling a DSP primitive — disclosed 3.13-removal risk, revisit
+before any Python upgrade), `twilio_protocol.py` (pure parsing/building
+for Twilio's Media Streams WS JSON messages — vendor isolation, the one
+place Twilio's own shapes are allowed to appear), `concurrency.py`
+(`STT_GATE`/`TTS_GATE` — real decisions, not guesses: STT capped at 1
+concurrent request because `scripts/parakeet_server.py` uses stdlib
+`HTTPServer`, not `ThreadingHTTPServer`, confirmed by reading it; TTS
+capped at 8 as a resource cap only, since each call gets its own
+`PiperTTSProvider` instance; `run_turn`/domain gets NO gate — already
+proven safe under real concurrent Postgres access, Part B), `call_session.py`
+(`PhoneCallSession` — the per-call audio engine: disclosure-before-audio,
+VAD-endpointed capture reusing `lakewood.vad.Endpointer` and
+`PersistentChat.run_turn`, TTS synthesis + resample + mu-law encode back
+out). 39 new tests, including a real isolation test (two concurrent
+`PhoneCallSession`s, two carts, one pepperoni never leaks into the
+other's line items) and real STT/no-speech/stereo-TTS failure-degrades-
+to-apology-not-a-crash cases (Part 4 groundwork, proven at the engine
+level already). Gates: full suite/validate 91/91/ratchet 59/91 unchanged,
+bandit clean. **RECOMMENDED NEXT: T-053 Phase 2 Part 3** (wire into a
+real ASGI HTTP+WS server — `store_for_did`, `resume_or_create`,
+`from_number`->`customer_id` — still offline-testable via the framework's
+own test client, no live account needed).
+
 ## T-053 Phase 2 Part 1 · Security scaffolding — **DONE, 2026-09-24**
 
 **Priority:** 0 · **Status:** Done. `lakewood/telephony/` (new):
