@@ -37,6 +37,45 @@ def default_vad_config() -> VadConfig:
     )
 
 
+_SILERO_FRAME_SAMPLES = 512   # Silero's own window size, 16kHz mono PCM16
+
+
+def silero_speech_probability(model, pcm16_bytes: bytes) -> float:
+    """Speech probability of the latest frame in `pcm16_bytes` (16kHz mono
+    PCM16), given an already-loaded Silero VAD `model`
+    (`faster_whisper.vad.get_vad_model()`). Extracted out of
+    `SoundDeviceMicrophone.capture()` below (T-050) so the phone path
+    (T-053 Phase 2 Part 2/3) can feed the SAME model the same way instead
+    of re-deriving this — `SileroVADModel.__call__` re-zeroes its internal
+    LSTM state on every call, so both callers re-run it over their own
+    full growing buffer each poll, the same non-streaming batch-chunking
+    pattern either way."""
+    import numpy as np
+    full = np.frombuffer(pcm16_bytes, dtype=np.int16)
+    usable = full[: (len(full) // _SILERO_FRAME_SAMPLES) * _SILERO_FRAME_SAMPLES]
+    if len(usable) == 0:
+        return 0.0
+    return float(model(usable.astype(np.float32) / 32768.0)[-1])
+
+
+def make_default_vad_probability_fn():
+    """Lazy-loads the real Silero VAD model once and returns a closure
+    `(pcm16_bytes) -> float` over it — the phone path's own version of
+    what `SoundDeviceMicrophone.capture()` does inline for local mic
+    capture. Raises `AudioConfigError` if `faster-whisper` isn't
+    installed, same failure mode/message as the local-mic path."""
+    try:
+        from faster_whisper.vad import get_vad_model
+    except ImportError as e:
+        raise AudioConfigError(
+            "VAD-based capture requires the optional 'faster-whisper' "
+            "package — it ships the Silero VAD model this endpointer "
+            "uses (see ADR-018). Install it: pip install faster-whisper."
+        ) from e
+    model = get_vad_model()
+    return lambda pcm16_bytes: silero_speech_probability(model, pcm16_bytes)
+
+
 class SoundDeviceMicrophone:
     """Real microphone capture, endpointed by Silero VAD instead of a fixed
     window (T-050). `seconds` (kept for interface compatibility with the
@@ -69,26 +108,23 @@ class SoundDeviceMicrophone:
             raise AudioConfigError(
                 "Microphone capture requires optional 'sounddevice'; "
                 "install it to run local voice.") from e
-        try:
-            from faster_whisper.vad import get_vad_model
-        except ImportError as e:
-            raise AudioConfigError(
-                "VAD-based capture requires the optional 'faster-whisper' "
-                "package — it ships the Silero VAD model this endpointer "
-                "uses (see ADR-018). Install it: pip install faster-whisper."
-            ) from e
+        # T-053 Phase 2 Part 3: the model-loading + probability computation
+        # below is now shared with the phone path (see
+        # `make_default_vad_probability_fn`/`silero_speech_probability`
+        # above) rather than re-derived — same AudioConfigError message/
+        # ordering as before this extraction (verified by
+        # tests/test_voice_vad_microphone.py, unchanged).
+        probability_fn = make_default_vad_probability_fn()
         import numpy as np
 
-        model = get_vad_model()
         cap = min(seconds, self.vad_config.max_utterance_seconds) if seconds else \
             self.vad_config.max_utterance_seconds
         config = replace(self.vad_config, max_utterance_seconds=cap)
         endpointer = Endpointer(config)
 
         rate = 16000
-        frame_samples = 512  # Silero's own window size
-        poll_samples = max(frame_samples,
-                          (int(rate * self.poll_seconds) // frame_samples) * frame_samples)
+        poll_samples = max(_SILERO_FRAME_SAMPLES,
+                          (int(rate * self.poll_seconds) // _SILERO_FRAME_SAMPLES) * _SILERO_FRAME_SAMPLES)
         start = time.monotonic()
         chunks: list = []
         with sd.InputStream(samplerate=rate, channels=1, dtype="int16") as stream:
@@ -97,8 +133,7 @@ class SoundDeviceMicrophone:
                 chunks.append(data[:, 0].copy())
                 elapsed = time.monotonic() - start
                 full = np.concatenate(chunks)
-                usable = full[: (len(full) // frame_samples) * frame_samples]
-                prob = float(model(usable.astype(np.float32) / 32768.0)[-1]) if len(usable) else 0.0
+                prob = probability_fn(full.tobytes())
                 if endpointer.update(elapsed, prob):
                     break
         audio = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.int16)

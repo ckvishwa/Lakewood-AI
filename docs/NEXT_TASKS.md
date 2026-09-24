@@ -2,6 +2,66 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 2 Part 3 · Real ASGI server — **DONE, 2026-09-24**
+
+**Priority:** 1 · **Status:** Done, fully offline via FastAPI's own
+`TestClient` (no real Twilio account). New `lakewood/telephony/app.py`
+(requires `fastapi`+`uvicorn`+`python-multipart`, added to
+`requirements.txt` — the one module in this package that needs a
+framework): `POST /telephony/twilio/voice` (rate limit -> signature
+validate -> `store_for_did`/`PersistentChat.start`/`resume_or_create` ->
+mint a stream token -> return TwiML via Twilio's own `VoiceResponse`
+builder) and `WS /telephony/twilio/media` (consume the stream token ->
+look up the registered `PhoneCallSession` -> disclosure on `start` ->
+feed inbound-track frames through the concurrency-gated engine -> send
+replies back). Blocking STT/TTS/domain work runs via
+`loop.run_in_executor`, never inline on the event loop multiplexing
+every concurrent call's WS connection. Extracted `silero_speech_probability`/
+`make_default_vad_probability_fn` out of `lakewood/voice.py`'s
+`SoundDeviceMicrophone.capture()` (T-050's own inline logic) so the phone
+path reuses the SAME Silero model wiring instead of re-deriving it —
+23 existing local-voice tests re-verified unaffected. 12 new
+`app.py`-level tests: signature/rate-limit/WS-token rejection, outbound-
+track frames never reaching the engine, and a full disclosure-then-turn-
+then-reply round trip through the real routes with a real cart line
+landing in the repo afterward.
+
+**Real incident, reported at full severity (this task's own bug, found
+and fixed the same session — CLAUDE.md's "report even when it's your own
+recent work"):** the first version of the full-round-trip WS test hung
+for **over an hour** before being killed. Root cause, found with
+`faulthandler.dump_traceback_later` rather than guessed: the test's VAD
+polling threshold (a few milliseconds) was being checked against REAL
+wall-clock `time.monotonic()` captured live inside `app.py`'s WS handler
+— not the synthetic, test-controlled `now` the pure `PhoneCallSession`
+unit tests (Part 2) use. Real cross-thread WS round-trip time under
+Starlette's `TestClient` was fast enough, unpredictably, to never
+reliably cross even a 5ms threshold within a bounded frame count, so the
+test's final blocking `receive_json()` waited for a reply that could
+legitimately take an unbounded number of real frames to ever trigger —
+not a deadlock in `app.py` itself (the stack dump showed the server's
+event loop idle, correctly waiting for the next message, exactly as
+designed). **Fix:** the test's own `VadConfig` now uses ZERO-ms
+thresholds (`min_speech_ms=0`, `min_silence_ms=0`) and `poll_seconds=0.0`
+— removes the real-wall-clock dependency entirely (a transition is
+detected the instant it's observed, in exactly 3 polls, regardless of
+machine speed) rather than relying on a "small enough" nonzero value.
+**Lesson filed, not just the fix, same pattern T-058's own "pin every
+real-time dependency explicitly" lesson already established:** any test
+driving code that reads a real clock (`time.monotonic()`/`time.time()`)
+across a real thread/process boundary must either inject that clock or
+use threshold-zero/trivially-satisfied conditions — "ran fine in
+isolation, hung in the full suite" is not evidence of flakiness in the
+PRODUCTION code, only evidence that the TEST's timing assumption was
+real-speed-dependent.
+
+Gates: full suite exit 0, 100%, same skip/xfail pattern. `validate`
+91/91, `score --adapter rule_based` 59/91, `bandit` — same 8 pre-existing
+low/low items, zero new. **RECOMMENDED NEXT: T-053 Phase 2 Part 4**
+(failure behavior — apology/retry/transfer escalation, using the
+`transfer_number` config work already staged and stashed this session;
+still fully offline-testable).
+
 ## T-053 Phase 2 Part 2 · Audio path and concurrency — **DONE, 2026-09-24**
 
 **Priority:** 1 · **Status:** Done, offline against fake providers (no

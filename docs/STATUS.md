@@ -24,6 +24,99 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 2 Part 3, 2026-09-24 (real ASGI server — "wire what's
+already built") — done, fully offline via FastAPI's own `TestClient`, no
+real Twilio account.**
+
+New `lakewood/telephony/app.py` (requires `fastapi`+`uvicorn`+
+`python-multipart`, added to `requirements.txt` this task — the one
+module in `lakewood/telephony/` that needs a framework; every other
+module in the package stays framework-free by design):
+
+- **`POST /telephony/twilio/voice`** — rate limit (source IP) -> Twilio
+  signature validate -> `config.py::store_for_did` -> `PersistentChat
+  .start` (this is the actual `resume_or_create` wiring the phase brief
+  asked for — same call text/local-voice already use) -> if a resume
+  offer comes back for the SAME `CallSid` (a webhook retry, not a real
+  customer callback — same reasoning `tests/test_telephony_call_start.py`
+  already established in Part 1), accept it transparently -> mint a
+  stream token (Part 1) -> return TwiML built with Twilio's own
+  `VoiceResponse`/`Connect`/`Stream` classes (proper XML escaping for
+  free — "buy, don't build" applied to XML generation with caller-
+  influenced content, same instinct as ADR-021's webhook-signature
+  decision).
+- **`WS /telephony/twilio/media`** — consumes the stream token (Part 1)
+  before accepting the connection at all; looks up the `PhoneCallSession`
+  the webhook already registered for that `call_sid`; on the provider's
+  own `start` event, triggers disclosure (Part 2's `on_call_started()`)
+  and sends it back framed as a real outbound `media` message; filters
+  every `media` event to `track == "inbound"` only (never processes
+  Rexi's own played-back audio — proven by a real test, not just
+  asserted); feeds inbound frames through `PhoneCallSession
+  .on_inbound_frame`; sends any resulting reply back the same way. Every
+  blocking call (STT/TTS/domain) runs via `loop.run_in_executor` against
+  a `ThreadPoolExecutor` — never inline on the event loop multiplexing
+  every concurrent call's own WebSocket, the literal mechanism behind
+  "one call's audio I/O never blocks on another's."
+
+**Extracted, not duplicated (Part 2's own "reuse, don't fork" — applied
+here too):** `lakewood/voice.py` gains `silero_speech_probability()`/
+`make_default_vad_probability_fn()`, pulled out of
+`SoundDeviceMicrophone.capture()`'s own inline model-loading/probability
+logic (T-050), so the phone path uses the SAME Silero wiring instead of
+re-deriving it. `capture()` itself refactored to call the extracted
+functions — behavior-preserving, re-verified: all 23 existing
+`test_voice*.py` tests pass unchanged, including the two that assert
+specific `AudioConfigError` messages/ordering for missing
+`sounddevice`/`faster-whisper`.
+
+12 new `app.py`-level tests: valid webhook returns TwiML with a stream
+URL, missing/forged signature rejected (403), rate limit blocks after the
+configured max (429), an invalid/unregistered stream token refuses the
+WebSocket connection before accepting it, outbound-track frames never
+reach the turn engine (a real assertion on the saved session's line
+count, not just "no crash"), and a full disclosure-then-turn-then-reply
+round trip through the REAL routes — ending with a real cart line
+actually persisted in the repository.
+
+**Real incident this task, reported at full severity even though it's
+this same session's own recent work (CLAUDE.md: report regardless of
+whose bug or how recently written):** the first version of the full-
+round-trip WebSocket test **hung for over an hour** before the user
+killed it. Diagnosed properly rather than guessed —
+`faulthandler.dump_traceback_later` dumped every thread's real stack: the
+server's own event loop thread was sitting idle in `select()`, correctly
+waiting for the next message exactly as designed; the TEST thread was
+blocked in its own final `receive_json()` call, waiting for a reply that
+was never going to come. **Root cause: a test-timing bug, not an
+application deadlock.** The test's VAD polling threshold (a few
+milliseconds) was checked against REAL wall-clock `time.monotonic()`
+captured live inside `app.py`'s WS handler — unlike Part 2's pure
+`PhoneCallSession` unit tests, which control a synthetic `now` directly,
+this test has no way to inject the clock across the real WebSocket/
+thread-pool round trip. A "small but nonzero" millisecond threshold is
+genuinely machine-speed-dependent: fast enough round-trip timing can run
+for an unbounded number of frames without ever crossing it. **Fix:** the
+test's own `VadConfig` now uses zero-ms thresholds
+(`min_speech_ms=0`/`min_silence_ms=0`) and `poll_seconds=0.0` — removes
+the real-time dependency entirely (a transition is detected the instant
+it's observed, in exactly 3 polls, provably, not probabilistically).
+**Lesson filed, not just the fix — the same class of finding T-058's own
+"pin every real-time dependency explicitly" lesson already named:** a
+test driving code that reads a real clock across a genuine thread/process
+boundary must either inject that clock or use trivially-satisfied
+(zero) thresholds; "passed in isolation, hung in the full run" is
+evidence about the TEST's timing assumption, not about the production
+code — confirmed directly here by reading the actual idle-vs-blocked
+thread stacks rather than assuming either side was at fault.
+
+**Gates run:** full suite exit 0, 100% (all dots), same skip/xfail
+pattern as baseline. `evals/runner.py validate` → 91/91 unchanged.
+`score --adapter rule_based` → 59/91 unchanged. `bandit -r lakewood
+scripts -ll` → same 8 pre-existing low-severity/low-confidence items,
+zero new. No prompt/tool-schema/provider surface touched — no live LLM
+gate required.
+
 **T-053 Phase 2 Part 2, 2026-09-24 (audio path and concurrency) — done,
 offline against fake providers throughout — no Twilio account needed
 yet.**
