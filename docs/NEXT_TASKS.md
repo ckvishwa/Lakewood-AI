@@ -2,6 +2,24 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 1 Part D · One host — **DONE, 2026-09-24**
+
+**Priority:** 1 · **Status:** Done. Full transcript and numbers:
+`docs/STATUS.md`'s T-053 Phase 1 Part D entry.
+
+Brought up the full stack (orchestrator, real Parakeet, real Piper,
+real Postgres) on a single WSL Ubuntu host from a genuinely clean venv —
+bring-up procedure documented and actually followed, not aspirational.
+Ran a real end-to-end session (fixture-audio turn 1, text-driven turns
+2–4, same disclosed methodology T-049/T-050/T-051 already established)
+— real Parakeet transcription, real Piper synthesis, real Postgres write
+verified by direct `SELECT`, correct `HELD_FOR_OPEN` behavior (ran after
+hours, reported honestly rather than staged). Perceived latency
+(speech-end → first audio) 0.498s vs. T-051's 0.781s baseline, a real
+36% cut, attributable to Piper's synthesis speed (Part C's own measured
+number, not re-derived here). No real ticket print — Part A never
+concluded a transport to print through.
+
 ## T-053 Phase 1 Part C · Linux TTS — **DONE, 2026-09-24**
 
 **Priority:** 1 · **Status:** Done. Full evidence:
