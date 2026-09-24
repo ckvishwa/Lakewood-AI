@@ -1,6 +1,11 @@
 # ADR-004 — Voice provider: buy, don't build; decision deferred to Phase 5
 
-**Status:** Proposed · 2026-09-06
+**Status:** Closed · 2026-09-06, closed 2026-09-24 (T-053 Phase 2 Part 0).
+The STT/TTS legs of the original cascade are self-hosted (ADR-016, ADR-020),
+not bought — this ADR's own cost table assumed a bought stack for those
+legs and is superseded there. The one leg still bought is telephony
+transport, decided in **ADR-021** (Twilio) — no separate ADR-004a needed;
+ADR-021 is the vendor record this ADR asked for.
 
 ## Context
 
