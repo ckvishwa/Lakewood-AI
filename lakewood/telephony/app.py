@@ -41,11 +41,12 @@ from fastapi.responses import PlainTextResponse, Response
 from twilio.twiml.voice_response import Connect, Stream, VoiceResponse
 
 from ..chat import PersistentChat, TextInterpreter
-from ..config import store_for_did
+from ..config import CONFIG, store_for_did
 from ..persistence.repository import SessionRepository
 from ..stt.base import STTProvider
 from ..tts.base import TextToSpeechProvider
 from ..vad import VadConfig
+from .call_control import CallControlError
 from .call_session import PhoneCallSession, VadProbabilityFn
 from .call_start import CallStartGuard
 from .rate_limit import RateLimiter
@@ -88,6 +89,13 @@ class TelephonyAppConfig:
     # out real production-tuned silence windows.
     vad_config: VadConfig | None = None
     poll_seconds: float = 0.15
+    # T-053 Phase 2 Part 4. None (the default) means "no real transfer
+    # mechanism configured" — a transfer still plays the spoken
+    # announcement and ends this WS's own involvement, but the actual
+    # PSTN redirect never happens; logged loudly (never silently) so a
+    # real deployment that forgot to wire a `TwilioCallControlClient`
+    # finds out from its logs, not from a customer complaint.
+    call_control: object | None = None
 
     def __post_init__(self) -> None:
         self.stream_tokens = StreamTokenIssuer(self.stream_token_secret, self.stream_token_ttl_seconds)
@@ -145,11 +153,31 @@ def create_app(cfg: TelephonyAppConfig, max_workers: int = 16) -> FastAPI:
                                  # re-derives it the same way internally.
         call = PersistentChat.start(cfg.repo, to_did, call_sid, from_number, printer=cfg.printer)
         if call.resume_offer is not None:
-            # Same CallSid retried -> the same underlying call, not a real
-            # customer callback (tests/test_telephony_call_start.py's own
-            # reasoning) — accept transparently rather than surface a
-            # "welcome back" offer for a call that never actually ended.
-            call.accept_resume()
+            if call.resume_offer.call_id == call_sid:
+                # Same CallSid retried -> the same underlying call, not a
+                # real customer callback (tests/test_telephony_call_start
+                # .py's own reasoning) — accept transparently rather than
+                # surface a "welcome back" offer for a call that never
+                # actually ended.
+                call.accept_resume()
+            else:
+                # A GENUINE callback (different CallSid, same phone
+                # number, within the resume window) — never silently
+                # resume a cart the customer hasn't confirmed they still
+                # want (CLAUDE.md's memory policy: "may not assume the
+                # customer still wants what they ordered before"). The
+                # real UX this phase's own brief asks for ("a hang-up and
+                # callback offers the cart back") — SPEAKING the offer and
+                # listening for yes/no — needs disclosure to already have
+                # played first, which itself requires `call.chat` to be
+                # set (`PersistentChat.mark_disclosure_played`'s own
+                # precondition); resolving that properly is real,
+                # nontrivial voice-flow work, not "wiring what's already
+                # built" — filed as T-060, not attempted here. Declining
+                # is the SAFE default in the meantime: the customer starts
+                # a fresh order rather than the assistant guessing they
+                # want the old one back.
+                call.decline_resume()
 
         session = PhoneCallSession(
             call, cfg.interpreter_factory(), cfg.stt_factory(), cfg.tts_factory(),
@@ -209,6 +237,24 @@ def create_app(cfg: TelephonyAppConfig, max_workers: int = 16) -> FastAPI:
                     if outcome is not None and stream_sid and outcome.outbound_mulaw:
                         await websocket.send_json(
                             build_outbound_media_message(stream_sid, outcome.outbound_mulaw))
+                    if outcome is not None and outcome.should_transfer:
+                        # T-053 Phase 2 Part 4: the announcement already
+                        # went out above; the actual PSTN redirect is a
+                        # REST call, not something this WS can do to
+                        # itself — CONFIG.transfer_number, never a caller-
+                        # supplied number (same server-bound posture as
+                        # store_id/F2).
+                        if cfg.call_control is not None:
+                            try:
+                                await loop.run_in_executor(
+                                    executor, cfg.call_control.transfer, call_sid, CONFIG.transfer_number)
+                            except CallControlError as e:
+                                logger.error("transfer failed for call_sid %s: %s", call_sid, e)
+                        else:
+                            logger.warning(
+                                "escalated call_sid %s to transfer, but no call_control "
+                                "client is configured — no real PSTN redirect happened", call_sid)
+                        break
                 elif isinstance(event, StopEvent):
                     break
                 # ConnectedEvent/MarkEvent: no action needed this phase.

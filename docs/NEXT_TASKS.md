@@ -2,6 +2,88 @@
 
 The execution queue. Keep this to the next 5–10 executable tasks.
 
+## T-053 Phase 2 Part 4 · Failure behavior — **DONE, 2026-09-26**
+
+**Priority:** 1 · **Status:** Done, fully offline (fake providers, no
+Twilio account). New `lakewood/telephony/failure_policy.py`
+(`FailureEscalation` — one consecutive-failure counter across every
+failure type: silence, STT error, LLM/provider trouble; escalates to
+transfer at 2 in a row, resets on any real success) and `call_control.py`
+(`build_transfer_twiml`, `TwilioCallControlClient`/`FakeCallControlClient`
+— redirecting a LIVE call via Twilio's REST API, since a call already
+mid-stream can't be redirected by returning new TwiML the way the
+initial webhook can). `CallTurnOutcome` gains `should_transfer`;
+`PhoneCallSession` applies the escalation policy once per turn and
+synthesizes the transfer announcement instead of the ordinary apology
+when it fires. `app.py`'s WS handler performs the actual REST transfer
+(via the injected `call_control` client — `None` by default, logged
+loudly rather than silently no-op'd if a real deployment forgets to wire
+one) and ends its own involvement in the call. Per-store `transfer_number`
+added to `data/menu.json`/`config.py` (real value: `+12038060537`,
+E.164) with a load-time loop guard (`ConfigError` if it ever equals
+`inbound_did` — the number the pilot's overflow forwarding rings FROM,
+so a failed call transferring back to it would bounce forever). 26 new
+tests across five files.
+
+**Real correctness gap found and fixed this task (not filed-for-later —
+fixed, since it's a safety issue, not a nice-to-have):** Part 3's webhook
+handler unconditionally called `accept_resume()` on ANY resume offer,
+including a GENUINE callback (a different CallSid, same phone number,
+within the resume window) — silently resuming a stale cart the customer
+never confirmed they still wanted, a direct violation of CLAUDE.md's
+memory policy ("may not assume the customer still wants what they
+ordered before"). Fixed: `app.py` now only auto-accepts when
+`resume_offer.call_id == call_sid` (a same-call webhook retry — Part 1's
+own, still-correct reasoning); a genuine different-CallSid callback now
+safely `decline_resume()`s instead — a fresh order, never a silently-
+resumed one.
+
+**Filed, not built here — T-060: speak the resume offer and listen for
+yes/no**, completing "a hang-up and callback offers the cart back"
+(Part 3's own original brief). Real blocker found while scoping it:
+`PersistentChat.mark_disclosure_played()`/`disclosure_played_at` both
+require `call.chat` to already be set, but a genuine resume offer leaves
+`chat` unset until accept/decline is called — T-057's disclosure-before-
+transcription requirement and the resume-offer question currently have
+no clean ordering against each other in `chat.py`'s existing design. This
+needs real design work in core `chat.py` (already relied on by
+production text/local-voice paths), not a "wiring" change — too large and
+too risky to attempt inside this already-large phase. The CLI sandbox's
+own `main()` (`lakewood/chat.py`) has the reference yes/no word-matching
+UX to reuse once the disclosure ordering is resolved.
+
+**Server-down fallback (deployment note, not code):** `build_transfer_twiml
+(CONFIG.transfer_number)`'s output is exactly what to paste into the
+Twilio number's Voice Fallback URL as a TwiML Bin (ADR-021's own
+mechanism) — generate it with `python -c "from lakewood.telephony
+.call_control import build_transfer_twiml; from lakewood.config import
+CONFIG; print(build_transfer_twiml(CONFIG.transfer_number))"`. Only
+needed once a real Twilio number exists — Part 5.
+
+Gates: full suite exit 0, same skip/xfail pattern. `validate` 91/91,
+`score --adapter rule_based` 59/91, bandit — same 8 pre-existing low/low
+items, zero new. **T-053 PHASE 2 (Parts 0-4) IS NOW DONE, offline.**
+Everything from here needs a real Twilio account — see the "what I need
+from the owner" list in this session's own report, not a numbered task
+(Part 5 itself is next, but it is not an executable task until those
+account/number/tunnel/legal items are supplied).
+
+## T-060 · Speak the resume offer, listen for yes/no (completes "callback offers the cart back")
+
+**Priority:** 3 · **Status:** Not started, filed by T-053 Phase 2 Part 4.
+**Scope:** resolve the `disclosure_played_at`/`chat`-not-yet-set ordering
+in `lakewood/chat.py::PersistentChat` (disclosure must still play before
+ANY transcription — T-057 — regardless of whether a resume decision is
+pending), then wire the CLI sandbox's existing yes/no word-matching
+(`lakewood/chat.py::main()`) into the phone path so a genuine callback
+(different CallSid, same phone number) gets asked "still have your
+large pepperoni — want to keep going, or start fresh?" instead of
+`app.py`'s current safe-but-blunt auto-decline. **Dependencies:** T-053
+Phase 2 (done). **Acceptance:** a real test proving a genuine callback
+is OFFERED the resume (not silently accepted OR silently declined),
+correctly classifies a yes/no/unclear answer, and re-prompts on unclear
+— mirroring the CLI's own already-working UX exactly, not a new design.
+
 ## T-053 Phase 2 Part 3 · Real ASGI server — **DONE, 2026-09-24**
 
 **Priority:** 1 · **Status:** Done, fully offline via FastAPI's own
