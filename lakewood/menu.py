@@ -25,6 +25,15 @@ with open(_DATA_PATH, "r", encoding="utf-8") as _f:
 # second store's own menu.json carries its own timezone).
 STORE_TIMEZONE = _RAW["store"]["timezone"]
 
+# T-053 Phase 2 Part 4: where a failed/unanswered/after-hours call gets
+# transferred. Per-store, same reasoning as STORE_TIMEZONE above — never a
+# global constant, never guessed, always this store's own real number.
+# `config.py::StoreConfig` validates at load time that this can never equal
+# the store's own forwarded public line (the loop-guard this phase's own
+# brief requires: transfer target and Twilio fallback must never point back
+# at the number that forwards TO Rexi in the first place).
+TRANSFER_NUMBER = _RAW["store"]["transfer_number"]
+
 TAX_RATE_NUMERATOR = _RAW["currency"]["tax_rate_numerator"]
 TAX_RATE_DENOMINATOR = _RAW["currency"]["tax_rate_denominator"]
 DELIVERY_SERVICE_CHARGE = _RAW["currency"]["delivery_service_charge_cents"]

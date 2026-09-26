@@ -24,6 +24,114 @@ execution.
 
 ## Current phase
 
+**T-053 Phase 2 Part 4, 2026-09-26 (failure behavior) — done, fully
+offline (fake providers, no Twilio account). T-053 PHASE 2 (Parts 0-4)
+IS NOW DONE.**
+
+New `lakewood/telephony/failure_policy.py` — `FailureEscalation`, ONE
+consecutive-failure counter across every failure type (silence, STT
+error, LLM/provider trouble — a customer doesn't care which layer
+struggled), escalating to transfer at 2 in a row (matches the phase
+brief's own scenario wording literally: "say nothing -> graceful prompt,
+THEN transfer"), resetting to zero on any real success. New
+`call_control.py` — `build_transfer_twiml` (Twilio's own `Dial` TwiML
+builder, proper escaping for free) plus `TwilioCallControlClient`/
+`FakeCallControlClient`: a call already mid-Media-Stream can't be
+redirected by returning new TwiML the way the initial webhook can — it
+has to be updated via Twilio's REST API (`calls(call_sid).update(twiml=
+...)`), so this is the one place that REST call happens.
+
+`CallTurnOutcome` gains `should_transfer`; `PhoneCallSession` applies the
+escalation policy exactly once per turn (via a NEW `_finish_turn` return
+shape — `(transcript, reply, is_failure)`, not-yet-synthesized — so an
+escalating turn never synthesizes the ordinary apology only to discard
+it for the transfer announcement) and synthesizes the transfer
+announcement instead when it fires. `app.py`'s WS handler performs the
+actual REST transfer through the injected `call_control` client (`None`
+by default — logged as an ERROR, never silently no-op'd, so a real
+deployment that forgot to wire a real client finds out from its logs)
+and ends its own involvement in the call afterward.
+
+Per-store `transfer_number` added: `data/menu.json`'s `store` block gains
+`"transfer_number": "+12038060537"` (the owner's own Google Voice number,
+E.164, next to `timezone` — same per-store-not-global reasoning T-059
+already established), `lakewood/menu.py` exposes `TRANSFER_NUMBER`,
+`config.py::StoreConfig` gains a `transfer_number` field with a real
+`__post_init__` **loop guard**: raises `ConfigError` at load time if
+`transfer_number == inbound_did` — the pilot's own overflow-forwarding
+setup means `inbound_did` (`+12037588880`) is the restaurant's real
+public line, which forwards unanswered calls TO Rexi; transferring a
+failed call back to that same number would bounce the two forever. Real,
+tested: `StoreConfig(inbound_did="+12037588880", transfer_number=
+"+12037588880")` raises; the real, loaded config (`StoreConfig()`) does
+not.
+
+**Real correctness gap found and FIXED this task, not just
+disclosed** (found while building the "a callback recovers it" test —
+CLAUDE.md: report incidental findings at full severity, including this
+same session's own earlier work): Part 3's webhook handler called
+`call.accept_resume()` unconditionally on ANY resume offer. That's
+correct for a same-CallSid webhook retry (Part 1's own reasoning, a
+literal retry of the same still-live call) — but WRONG for a genuine
+callback (a different CallSid, same phone number, within the 30-minute
+resume window): it silently resumed a stale cart the customer never
+confirmed they still wanted, a direct violation of CLAUDE.md's memory
+policy ("may not assume the customer still wants what they ordered
+before"). **Fixed:** `app.py` now checks `resume_offer.call_id ==
+call_sid` — same-call retry still auto-accepts (unchanged, still
+correct); a genuine different-CallSid callback now calls
+`decline_resume()` instead, starting a fresh order rather than guessing.
+Proven by a real test: a dropped call's cart (1 line item) is correctly
+DELETED on a genuine callback, and the new call gets its own fresh
+(also real) cart, not the old one silently carried over.
+
+**Filed as T-060, not built here:** the FULL desired UX ("a hang-up and
+callback offers the cart back," Part 3's own original brief) needs the
+resume offer actually SPOKEN and the customer's yes/no actually
+listened for — not built this task because a real blocker surfaced while
+scoping it: `PersistentChat.disclosure_played_at`/`mark_disclosure_played()`
+both require `call.chat` to already be set, but a genuine resume offer
+leaves `chat` unset until accept/decline resolves it — T-057's
+disclosure-before-transcription requirement and an unresolved resume
+offer currently have no clean ordering against each other in `chat.py`'s
+existing design. That's real design work in a core, already-relied-upon
+production file (text/local-voice paths both depend on it), not a
+"wiring" change Part 4's stated scope covers — too large and too risky
+to attempt inside an already-large phase. `lakewood/chat.py::main()`
+(the CLI sandbox) already has the exact reference yes/no word-matching
+UX to reuse once the ordering is resolved.
+
+**Server-down fallback — deployment note, not code (the mechanism is
+ADR-021's own TwiML Bin, already decided):** `build_transfer_twiml
+(CONFIG.transfer_number)`'s output is exactly what to paste into the
+Twilio number's Voice Fallback URL as a TwiML Bin once a real number
+exists (Part 5). Generate it: `python -c "from lakewood.telephony
+.call_control import build_transfer_twiml; from lakewood.config import
+CONFIG; print(build_transfer_twiml(CONFIG.transfer_number))"`.
+
+26 new tests across 5 files (`test_telephony_failure_policy.py`,
+`test_telephony_call_control.py`, `test_telephony_call_session_failure_
+escalation.py`, `test_telephony_app_failure_transfer.py`,
+`test_telephony_app_dropped_call_recovery.py`, plus `test_config.py` for
+the loop guard) — including a full escalate-and-transfer round trip
+through the REAL routes ending in a real (fake) `FakeCallControlClient
+.transfers` record, and the dropped-call/callback test described above.
+
+**Lesson applied, not repeated:** every new test driving `PhoneCallSession`
+through the real WS routes uses a `VadConfig` with ALL thresholds
+(including `no_speech_timeout_seconds`, not just min_speech/min_silence —
+a distinct real-elapsed-time check, learned the hard way building THIS
+task's own dropped-call test, which hung the same way Part 3's did until
+diagnosed with `faulthandler.dump_traceback_later` again) at zero — no
+new test in this task relies on real wall-clock speed to reach a
+threshold.
+
+**Gates run:** full suite exit 0, same skip/xfail pattern. `evals/runner
+.py validate` → 91/91 unchanged. `score --adapter rule_based` → 59/91
+unchanged. `bandit -r lakewood scripts -ll` → same 8 pre-existing
+low/low items, zero new. No prompt/tool-schema/provider surface touched
+— no live LLM gate required.
+
 **T-053 Phase 2 Part 3, 2026-09-24 (real ASGI server — "wire what's
 already built") — done, fully offline via FastAPI's own `TestClient`, no
 real Twilio account.**

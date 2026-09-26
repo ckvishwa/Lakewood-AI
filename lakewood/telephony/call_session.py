@@ -37,6 +37,7 @@ from .audio_codec import (
     PHONE_SAMPLE_RATE_HZ, STT_SAMPLE_RATE_HZ, mulaw_to_pcm16, pcm16_to_mulaw, resample_pcm16,
 )
 from .concurrency import STT_GATE, TTS_GATE
+from .failure_policy import TRANSFER_ANNOUNCEMENT, FailureEscalation
 
 # Same wording voice.py's LocalVoiceLoop.turn() uses for the identical
 # failure (STTCallError/silence) — one apology vocabulary across every
@@ -55,6 +56,7 @@ class CallTurnOutcome:
     transcript: str
     reply: str
     outbound_mulaw: bytes   # ready to frame into outbound `media` messages
+    should_transfer: bool = False   # Part 4: repeated-failure escalation fired this turn
 
 
 VadProbabilityFn = Callable[[bytes], float]   # 16kHz mono PCM16 bytes -> speech probability
@@ -81,6 +83,10 @@ class PhoneCallSession:
         self.vad_probability_fn = vad_probability_fn
         self.vad_config = vad_config or default_vad_config()
         self.poll_seconds = poll_seconds
+        # Whole-CALL state, deliberately not reset per turn (unlike
+        # everything in `_reset_turn`) — Part 4's escalation tracks
+        # consecutive failures ACROSS turns.
+        self._escalation = FailureEscalation()
         self._reset_turn()
 
     def _reset_turn(self) -> None:
@@ -133,14 +139,31 @@ class PhoneCallSession:
         if not self._endpointer.update(elapsed, prob):
             return None
 
-        outcome = self._finish_turn(pcm16k)
+        transcript, reply, is_failure = self._finish_turn(pcm16k)
+
+        # Part 4: repeated-failure escalation — one counter across every
+        # failure type (silence, STT error, LLM/provider trouble; see
+        # failure_policy.py's own docstring for why). A successful turn
+        # (is_failure=False) resets it, even if this turn itself asked a
+        # clarifying question — that's normal conversation, not a failure.
+        should_transfer = self._escalation.record(is_failure)
+        if should_transfer:
+            reply = TRANSFER_ANNOUNCEMENT
+
+        outcome = CallTurnOutcome(transcript, reply, self._synthesize_to_mulaw(reply),
+                                  should_transfer=should_transfer)
         self._reset_turn()
         return outcome
 
-    def _finish_turn(self, pcm16k: bytes) -> CallTurnOutcome:
+    def _finish_turn(self, pcm16k: bytes) -> tuple[str, str, bool]:
+        """Returns `(transcript, reply, is_failure)` — NOT yet
+        synthesized; `on_inbound_frame` applies the escalation policy and
+        synthesizes exactly once, so a turn that escalates never
+        synthesizes the ordinary apology only to immediately discard it
+        for the transfer announcement instead."""
         if not self._endpointer.speech_detected:
             # Scenario 6 (Part 5): the customer said nothing at all.
-            return CallTurnOutcome("", _STT_TROUBLE_REPLY, self._synthesize_to_mulaw(_STT_TROUBLE_REPLY))
+            return "", _STT_TROUBLE_REPLY, True
 
         fd, path = tempfile.mkstemp(suffix=".wav")
         os.close(fd)
@@ -153,8 +176,7 @@ class PhoneCallSession:
             try:
                 stt_result = STT_GATE.run(self.stt.transcribe, path, correlation_id=self.call.call_id)
             except STTCallError:
-                return CallTurnOutcome("", _STT_TROUBLE_REPLY,
-                                        self._synthesize_to_mulaw(_STT_TROUBLE_REPLY))
+                return "", _STT_TROUBLE_REPLY, True
         finally:
             try:
                 os.unlink(path)
@@ -162,8 +184,12 @@ class PhoneCallSession:
                 pass
 
         result = self.call.run_turn(self.interpreter, stt_result.transcript)
-        return CallTurnOutcome(stt_result.transcript, result.reply,
-                                self._synthesize_to_mulaw(result.reply))
+        # LLMInterpreter exposes last_provider_error for exactly this
+        # (interpreter.py's own T-039A Part 4 comment); RuleBasedInterpreter
+        # has no such concept — getattr keeps this call surface working
+        # with either, never assuming the attribute exists.
+        is_failure = getattr(self.interpreter, "last_provider_error", None) is not None
+        return stt_result.transcript, result.reply, is_failure
 
     # -- outbound audio ----------------------------------------------------
 
